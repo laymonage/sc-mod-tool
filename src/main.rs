@@ -189,11 +189,12 @@ impl ScModToolApp {
             let result = if cancelled.load(Ordering::Relaxed) {
                 Err("Playback cancelled.".to_owned())
             } else {
-                sc_mod_tool_core::read_segment(
+                sc_mod_tool_core::read_segment_with_cancel(
                     &root,
                     &bank_path,
                     segment.offset,
                     segment.byte_length,
+                    &cancelled,
                 )
                 .and_then(|bytes| {
                     if cancelled.load(Ordering::Relaxed) {

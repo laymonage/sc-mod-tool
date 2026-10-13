@@ -1,6 +1,7 @@
 pub mod decoder;
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -168,9 +169,32 @@ pub fn read_segment(
     offset: u64,
     byte_length: u64,
 ) -> Result<Vec<u8>, String> {
+    read_segment_inner(root, relative_path, offset, byte_length, None)
+}
+
+pub fn read_segment_with_cancel(
+    root: &Path,
+    relative_path: &str,
+    offset: u64,
+    byte_length: u64,
+    cancelled: &AtomicBool,
+) -> Result<Vec<u8>, String> {
+    read_segment_inner(root, relative_path, offset, byte_length, Some(cancelled))
+}
+
+fn read_segment_inner(
+    root: &Path,
+    relative_path: &str,
+    offset: u64,
+    byte_length: u64,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<u8>, String> {
     let sounds = find_sounds_directory(root)?;
     let file_path = safe_child_path(&sounds, relative_path)?;
-    let metadata = fs::metadata(&file_path)
+    let mut file = fs::File::open(&file_path)
+        .map_err(|error| format!("Could not open {}: {error}", file_path.display()))?;
+    let metadata = file
+        .metadata()
         .map_err(|error| format!("Could not inspect {}: {error}", file_path.display()))?;
     if !metadata.is_file() {
         return Err(format!(
@@ -189,11 +213,37 @@ pub fn read_segment(
         ));
     }
 
-    let bytes = fs::read(&file_path)
-        .map_err(|error| format!("Could not read {}: {error}", file_path.display()))?;
-    let start = usize::try_from(offset).map_err(|_| "Segment offset is too large.".to_owned())?;
-    let end = usize::try_from(end).map_err(|_| "Segment end is too large.".to_owned())?;
-    Ok(bytes[start..end].to_vec())
+    let length = usize::try_from(byte_length)
+        .map_err(|_| "Segment length is too large to read.".to_owned())?;
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err("Playback cancelled.".to_owned());
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|error| format!("Could not allocate {length} bytes for the segment: {error}"))?;
+    bytes.resize(length, 0);
+
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| format!("Could not seek in {}: {error}", file_path.display()))?;
+
+    const READ_CHUNK_SIZE: usize = 64 * 1024;
+    for chunk in bytes.chunks_mut(READ_CHUNK_SIZE) {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err("Playback cancelled.".to_owned());
+        }
+        file.read_exact(chunk).map_err(|error| {
+            format!(
+                "Could not read segment from {}: {error}",
+                file_path.display()
+            )
+        })?;
+    }
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err("Playback cancelled.".to_owned());
+    }
+
+    Ok(bytes)
 }
 
 fn find_sounds_directory(root: &Path) -> Result<PathBuf, String> {
@@ -673,9 +723,22 @@ mod tests {
         fs::write(sounds.join("1_1_0.LS0"), make_segment()).unwrap();
 
         let data = read_segment(game.path(), "ENGLISH/1_1_0.LS0", 48, 55).unwrap();
-        assert_eq!(data.len(), 55);
+        assert_eq!(data, make_segment()[48..].to_vec());
         assert!(read_segment(game.path(), "ENGLISH", 0, 1).is_err());
         assert!(read_segment(game.path(), "../outside", 0, 1).is_err());
         assert!(read_segment(game.path(), "ENGLISH/1_1_0.LS0", 100, 20).is_err());
+    }
+
+    #[test]
+    fn segment_read_honours_cancellation() {
+        let game = TempDir::new();
+        let sounds = game.path().join("Sounds/ENGLISH");
+        fs::create_dir_all(&sounds).unwrap();
+        fs::write(sounds.join("1_1_0.LS0"), make_segment()).unwrap();
+        let cancelled = AtomicBool::new(true);
+
+        let error = read_segment_with_cancel(game.path(), "ENGLISH/1_1_0.LS0", 0, 103, &cancelled)
+            .unwrap_err();
+        assert_eq!(error, "Playback cancelled.");
     }
 }
