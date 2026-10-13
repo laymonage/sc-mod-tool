@@ -27,5 +27,20 @@ The core crate compiles only the upstream Ubisoft ADPCM decoder and the small
 SC1 segment adapter. Include vgmstream's license and copyright notices when
 redistributing the linked application.
 
+## Local game-data integration test
+
+The full game-data decoder test is ignored during ordinary test runs and in CI.
+Run it explicitly from PowerShell. By default it looks for `../Splinter Cell`
+relative to the app repository root. Set `SC1_GAME_DIR` to override this with
+the game installation or its `Sounds` directory:
+
+```powershell
+cargo test --manifest-path sc-mod-tool\core\Cargo.toml --test game_audio -- --ignored --nocapture
+```
+
+It scans each discovered language and decodes every segment currently
+recognized as supported, reading each bank once. It verifies decoded sample
+counts and sample rates against the scanner metadata.
+
 Linux and macOS builds are planned for GitHub Actions and have not yet been
 validated.
