@@ -1,0 +1,10 @@
+[package]
+name = "sc-mod-tool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.31.1"
+rfd = "0.15.3"
+rodio = "0.20.1"
+sc-mod-tool-core = { path = "core" }

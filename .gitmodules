@@ -1,0 +1,3 @@
+[submodule "vendor/vgmstream"]
+	path = vendor/vgmstream
+	url = https://github.com/vgmstream/vgmstream.git
