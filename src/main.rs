@@ -720,7 +720,10 @@ fn start_audio(
 fn main() -> eframe::Result<()> {
     eframe::run_native(
         "SC Mod Tool",
-        eframe::NativeOptions::default(),
+        eframe::NativeOptions {
+            renderer: eframe::Renderer::Wgpu,
+            ..Default::default()
+        },
         Box::new(|_| Ok(Box::new(ScModToolApp::new()))),
     )
 }
