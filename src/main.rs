@@ -48,7 +48,7 @@ struct ActivePlayback {
     segment_id: String,
 }
 
-struct ScModToolApp {
+struct SCModToolApp {
     sender: Sender<WorkerMessage>,
     receiver: Receiver<WorkerMessage>,
     root: Option<PathBuf>,
@@ -69,7 +69,7 @@ struct ScModToolApp {
     status_is_error: bool,
 }
 
-impl ScModToolApp {
+impl SCModToolApp {
     fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
@@ -631,7 +631,7 @@ impl ScModToolApp {
     }
 }
 
-impl eframe::App for ScModToolApp {
+impl eframe::App for SCModToolApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_messages(ctx);
         if self
@@ -724,6 +724,6 @@ fn main() -> eframe::Result<()> {
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()
         },
-        Box::new(|_| Ok(Box::new(ScModToolApp::new()))),
+        Box::new(|_| Ok(Box::new(SCModToolApp::new()))),
     )
 }

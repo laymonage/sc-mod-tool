@@ -8,12 +8,12 @@
     <PublishAot>true</PublishAot>
     <NativeLib>Shared</NativeLib>
     <SelfContained>true</SelfContained>
-    <AssemblyName>ScModUelibBridge</AssemblyName>
+    <AssemblyName>SCModUELibBridge</AssemblyName>
   </PropertyGroup>
 
   <!-- The Rust executables have no rpath; load the bridge from beside them. -->
   <PropertyGroup Condition="$(RuntimeIdentifier.StartsWith('osx'))">
-    <SharedLibraryInstallName>@executable_path/libScModUelibBridge.dylib</SharedLibraryInstallName>
+    <SharedLibraryInstallName>@executable_path/libSCModUELibBridge.dylib</SharedLibraryInstallName>
   </PropertyGroup>
 
   <ItemGroup>

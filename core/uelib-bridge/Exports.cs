@@ -7,7 +7,7 @@ using System.Text.Json;
 using UELib;
 using UELib.Core;
 
-namespace ScModUelibBridge;
+namespace SCModUELibBridge;
 
 public static unsafe class Exports
 {

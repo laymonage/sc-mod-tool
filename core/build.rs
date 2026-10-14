@@ -98,8 +98,8 @@ fn build_uelib_bridge(manifest_dir: &Path) {
     let (link_dir, library, runtime_library) = match platform {
         Platform::Windows => (
             output_dir.join("native"),
-            output_dir.join("native/ScModUelibBridge.lib"),
-            publish_dir.join("ScModUelibBridge.dll"),
+            output_dir.join("native/SCModUELibBridge.lib"),
+            publish_dir.join("SCModUELibBridge.dll"),
         ),
         Platform::Linux => prepare_linker_library(&publish_dir, "so"),
         Platform::MacOS => prepare_linker_library(&publish_dir, "dylib"),
@@ -113,7 +113,7 @@ fn build_uelib_bridge(manifest_dir: &Path) {
     }
 
     println!("cargo:rustc-link-search=native={}", link_dir.display());
-    println!("cargo:rustc-link-lib=dylib=ScModUelibBridge");
+    println!("cargo:rustc-link-lib=dylib=SCModUELibBridge");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let profile_dir = out_dir
@@ -169,8 +169,8 @@ impl Platform {
 /// Copies the published library to a `lib`-prefixed name the linker can
 /// find, returning the link directory, linker library, and runtime library.
 fn prepare_linker_library(publish_dir: &Path, extension: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let published_library = publish_dir.join(format!("ScModUelibBridge.{extension}"));
-    let linker_library = publish_dir.join(format!("libScModUelibBridge.{extension}"));
+    let published_library = publish_dir.join(format!("SCModUELibBridge.{extension}"));
+    let linker_library = publish_dir.join(format!("libSCModUELibBridge.{extension}"));
     if !published_library.is_file() {
         panic!(
             "The UELib bridge build did not produce {}.",
