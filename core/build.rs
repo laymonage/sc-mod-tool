@@ -32,26 +32,41 @@ fn main() {
     }
     build.compile("sc1_vgmstream_decoder");
 
-    build_uelib_bridge(&manifest_dir);
+    println!("cargo::rustc-check-cfg=cfg(uelib_bridge)");
+    if build_uelib_bridge(&manifest_dir) {
+        println!("cargo::rustc-cfg=uelib_bridge");
+    }
 }
 
-fn build_uelib_bridge(manifest_dir: &Path) {
+fn build_uelib_bridge(manifest_dir: &Path) -> bool {
     let target = env::var("TARGET").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
-    let (runtime, windows) = match target.as_str() {
-        "x86_64-pc-windows-msvc" => ("win-x64", true),
-        "x86_64-unknown-linux-gnu" => ("linux-x64", false),
+    let (runtime, platform) = match target.as_str() {
+        "x86_64-pc-windows-msvc" => ("win-x64", Platform::Windows),
+        "x86_64-unknown-linux-gnu" => ("linux-x64", Platform::Linux),
+        "aarch64-apple-darwin" => ("osx-arm64", Platform::MacOS),
+        "x86_64-apple-darwin" => ("osx-x64", Platform::MacOS),
         _ if target.contains("linux") => {
             panic!("The UELib Native AOT bridge currently supports x86_64-unknown-linux-gnu only.")
         }
         _ if target.contains("windows") => {
             panic!("The UELib Native AOT bridge currently supports x86_64-pc-windows-msvc only.")
         }
-        _ => return,
+        _ if target.contains("apple") => {
+            panic!(
+                "The UELib Native AOT bridge currently supports aarch64-apple-darwin and x86_64-apple-darwin only."
+            )
+        }
+        _ => return false,
     };
-    if !windows && host != target {
+    if platform == Platform::Linux && host != target {
         panic!(
             "Build the Linux UELib Native AOT bridge on Linux (for example, from WSL), not via cross-compilation from {host}."
+        );
+    }
+    if platform == Platform::MacOS && !host.contains("apple") {
+        panic!(
+            "Build the macOS UELib Native AOT bridge on macOS, not via cross-compilation from {host}."
         );
     }
 
@@ -87,28 +102,14 @@ fn build_uelib_bridge(manifest_dir: &Path) {
         .join(framework)
         .join(runtime)
         .join("publish");
-    let (link_dir, library, runtime_library) = if windows {
-        (
+    let (link_dir, library, runtime_library) = match platform {
+        Platform::Windows => (
             output_dir.join("native"),
             output_dir.join("native/ScModUelibBridge.lib"),
             publish_dir.join("ScModUelibBridge.dll"),
-        )
-    } else {
-        let published_library = publish_dir.join("ScModUelibBridge.so");
-        let linker_library = publish_dir.join("libScModUelibBridge.so");
-        if !published_library.is_file() {
-            panic!(
-                "The Linux UELib bridge build did not produce {}.",
-                published_library.display()
-            );
-        }
-        fs::copy(&published_library, &linker_library).unwrap_or_else(|error| {
-            panic!(
-                "Could not prepare the Linux UELib bridge for linking at {}: {error}",
-                linker_library.display()
-            )
-        });
-        (publish_dir.clone(), linker_library.clone(), linker_library)
+        ),
+        Platform::Linux => prepare_linker_library(&publish_dir, "so"),
+        Platform::MacOS => prepare_linker_library(&publish_dir, "dylib"),
     };
     if !library.is_file() || !runtime_library.is_file() {
         panic!(
@@ -145,4 +146,36 @@ fn build_uelib_bridge(manifest_dir: &Path) {
             )
         });
     }
+    true
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    Windows,
+    Linux,
+    MacOS,
+}
+
+/// Copies the published library to a `lib`-prefixed name the linker can
+/// find, returning the link directory, linker library, and runtime library.
+fn prepare_linker_library(publish_dir: &Path, extension: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let published_library = publish_dir.join(format!("ScModUelibBridge.{extension}"));
+    let linker_library = publish_dir.join(format!("libScModUelibBridge.{extension}"));
+    if !published_library.is_file() {
+        panic!(
+            "The UELib bridge build did not produce {}.",
+            published_library.display()
+        );
+    }
+    fs::copy(&published_library, &linker_library).unwrap_or_else(|error| {
+        panic!(
+            "Could not prepare the UELib bridge for linking at {}: {error}",
+            linker_library.display()
+        )
+    });
+    (
+        publish_dir.to_path_buf(),
+        linker_library.clone(),
+        linker_library,
+    )
 }

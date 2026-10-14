@@ -11,6 +11,11 @@
     <AssemblyName>ScModUelibBridge</AssemblyName>
   </PropertyGroup>
 
+  <!-- The Rust executables have no rpath; load the bridge from beside them. -->
+  <PropertyGroup Condition="$(RuntimeIdentifier.StartsWith('osx'))">
+    <SharedLibraryInstallName>@executable_path/libScModUelibBridge.dylib</SharedLibraryInstallName>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Eliot.UELib" Version="1.13.7" />
   </ItemGroup>

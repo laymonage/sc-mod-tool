@@ -1,8 +1,5 @@
 use std::collections::{HashMap, HashSet};
-#[cfg(any(
-    all(windows, target_arch = "x86_64", target_env = "msvc"),
-    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
-))]
+#[cfg(uelib_bridge)]
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -196,10 +193,7 @@ pub fn load_verified_subtitles(
 }
 
 fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
-    #[cfg(any(
-        all(windows, target_arch = "x86_64", target_env = "msvc"),
-        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
-    ))]
+    #[cfg(uelib_bridge)]
     {
         unsafe extern "C" {
             fn scmod_scan_script_audio_links(
@@ -245,14 +239,11 @@ fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
         Ok(result)
     }
 
-    #[cfg(not(any(
-        all(windows, target_arch = "x86_64", target_env = "msvc"),
-        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
-    )))]
+    #[cfg(not(uelib_bridge))]
     {
         let _ = game_root;
         Err(
-            "Compiled-script subtitle analysis is currently available only in Windows x86-64 MSVC or Linux x86-64 GNU builds.".to_owned(),
+            "Compiled-script subtitle analysis is currently available only in Windows x86-64 MSVC, Linux x86-64 GNU, or macOS builds.".to_owned(),
         )
     }
 }
