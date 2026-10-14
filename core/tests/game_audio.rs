@@ -3,7 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use sc_mod_tool_core::{decoder::decode, discover_banks, discover_languages};
+use sc_mod_tool_core::{
+    decoder::decode,
+    discover_banks, discover_languages,
+    subtitles::{MappingConfidence, load_verified_subtitles},
+};
 
 fn sounds_directory(game_root: &Path) -> PathBuf {
     if game_root
@@ -45,6 +49,38 @@ fn decodes_every_discovered_game_segment() {
     for language in languages {
         let banks = discover_banks(&game_root, &language.directory)
             .unwrap_or_else(|error| panic!("Could not scan {}: {error}", language.label));
+        let subtitles = load_verified_subtitles(&game_root, &language.directory, &banks)
+            .unwrap_or_else(|error| panic!("Could not load {} subtitles: {error}", language.label));
+        if language.directory.eq_ignore_ascii_case("ENGLISH")
+            || language.directory.eq_ignore_ascii_case("GERMAN")
+        {
+            assert!(
+                subtitles.mapped_pairs > 0,
+                "{}: expected direct compiled subtitle/audio links",
+                language.label
+            );
+        }
+        for (segment_id, possible_subtitles) in &subtitles.by_segment {
+            assert!(
+                banks
+                    .iter()
+                    .flat_map(|bank| &bank.segments)
+                    .any(|segment| segment.id == *segment_id),
+                "{}: subtitle mapping refers to an undiscovered segment",
+                segment_id
+            );
+            for subtitle in possible_subtitles {
+                assert!(
+                    matches!(
+                        subtitle.confidence,
+                        MappingConfidence::ExplicitCompiledReference
+                    ),
+                    "{}: mapping is not based on an explicit compiled reference",
+                    segment_id
+                );
+                assert!(!subtitle.text.trim().is_empty(), "{segment_id}: empty cue");
+            }
+        }
         let mut language_banks = 0;
         let mut language_segments = 0;
 
@@ -93,9 +129,16 @@ fn decodes_every_discovered_game_segment() {
         }
 
         println!(
-            "{}: decoded {language_segments} segments from {language_banks} banks",
-            language.label
+            "{}: decoded {language_segments} segments from {language_banks} banks; mapped {}/{} explicit subtitle/audio references across {} segments with {} warnings",
+            language.label,
+            subtitles.mapped_pairs,
+            subtitles.explicit_pairs,
+            subtitles.by_segment.len(),
+            subtitles.warnings.len()
         );
+        for warning in subtitles.warnings.iter().take(8) {
+            println!("  subtitle analysis warning: {warning}");
+        }
         total_banks += language_banks;
         total_segments += language_segments;
     }

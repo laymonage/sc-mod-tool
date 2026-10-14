@@ -1,4 +1,5 @@
 pub mod decoder;
+pub mod subtitles;
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};

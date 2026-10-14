@@ -1,2 +1,4 @@
 target/
 /core/Cargo.lock
+/core/uelib-bridge/bin/
+/core/uelib-bridge/obj/

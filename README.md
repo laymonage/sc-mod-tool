@@ -9,17 +9,28 @@ The MVP does not modify game files. It does not claim support for every `.LS0`
 bank, Ubisoft codec, or Unreal `.uax` package. Banks without a recognized
 stream include an explanation in the UI.
 
+Subtitle links are derived from the selected game's compiled UnrealScript
+references, sound-object map keys in `.uax` packages, and locale-specific
+`MAPS.LM0` records. Cue text is read from the game's localization files.
+Only direct compiled `Localize`/`Sound` pairs are shown; sequence-based
+associations are not inferred. When one sound is referenced by multiple cues,
+the UI shows each possible subtitle with its provenance.
+
 UI-independent parts are placed in `core` to allow for building CLIs.
 
 ## Windows development
 
 Build from a Visual Studio developer shell with the x64 C++ tools available:
 
+The Windows x64 build also requires the .NET 10 SDK and MSVC tools for
+publishing the bundled Native AOT UELib bridge. The resulting bridge DLL is
+self-contained and does not require a .NET runtime when the app runs.
+
 ```powershell
 git submodule update --init --recursive
-cargo test --manifest-path sc-mod-tool\core\Cargo.toml
-cargo test --manifest-path sc-mod-tool\Cargo.toml
-cargo run --manifest-path sc-mod-tool\Cargo.toml
+cargo test --manifest-path core\Cargo.toml
+cargo test
+cargo run
 ```
 
 The vgmstream source is pinned as a Git submodule under `vendor/vgmstream`.
@@ -35,12 +46,10 @@ relative to the app repository root. Set `SC1_GAME_DIR` to override this with
 the game installation or its `Sounds` directory:
 
 ```powershell
-cargo test --manifest-path sc-mod-tool\core\Cargo.toml --test game_audio -- --ignored --nocapture
+cargo test --manifest-path core\Cargo.toml --test game_audio -- --ignored --nocapture
 ```
 
 It scans each discovered language and decodes every segment currently
 recognized as supported, reading each bank once. It verifies decoded sample
-counts and sample rates against the scanner metadata.
-
-Linux and macOS builds are planned for GitHub Actions and have not yet been
-validated.
+counts and sample rates against the scanner metadata, and verifies dynamically
+derived subtitle links against discovered segment IDs and localized cue text.

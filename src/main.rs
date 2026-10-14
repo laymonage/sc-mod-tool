@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,7 +8,10 @@ use std::time::Duration;
 
 use eframe::egui;
 use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer};
-use sc_mod_tool_core::{Bank, Language, Segment};
+use sc_mod_tool_core::{
+    Bank, Language, Segment,
+    subtitles::{Subtitle, SubtitleAnalysis},
+};
 
 enum WorkerMessage {
     Languages {
@@ -23,6 +27,7 @@ enum WorkerMessage {
     Banks {
         request: u64,
         result: Result<Vec<Bank>, String>,
+        subtitles: Result<SubtitleAnalysis, String>,
     },
     Playback {
         request: u64,
@@ -58,6 +63,8 @@ struct ScModToolApp {
     playback_cancel: Option<Arc<AtomicBool>>,
     scan_progress: Option<ScanProgress>,
     active_playback: Option<ActivePlayback>,
+    subtitles: HashMap<String, Vec<Subtitle>>,
+    subtitle_warnings: Vec<String>,
     status: String,
     status_is_error: bool,
 }
@@ -80,6 +87,8 @@ impl ScModToolApp {
             playback_cancel: None,
             scan_progress: None,
             active_playback: None,
+            subtitles: HashMap::new(),
+            subtitle_warnings: Vec::new(),
             status: "Select the Splinter Cell installation or its Sounds folder.".to_owned(),
             status_is_error: false,
         }
@@ -103,6 +112,8 @@ impl ScModToolApp {
         self.selected_language = None;
         self.banks.clear();
         self.selected_bank = None;
+        self.subtitles.clear();
+        self.subtitle_warnings.clear();
         self.scan_progress = None;
         self.language_request = self.language_request.wrapping_add(1);
         let request = self.language_request;
@@ -127,6 +138,8 @@ impl ScModToolApp {
         self.stop_playback();
         self.banks.clear();
         self.selected_bank = None;
+        self.subtitles.clear();
+        self.subtitle_warnings.clear();
         self.scan_progress = Some(ScanProgress {
             completed: 0,
             total: 0,
@@ -155,7 +168,16 @@ impl ScModToolApp {
                     repaint.request_repaint();
                 },
             );
-            let _ = sender.send(WorkerMessage::Banks { request, result });
+            let subtitles = if let Ok(banks) = &result {
+                sc_mod_tool_core::subtitles::load_verified_subtitles(&root, &language, banks)
+            } else {
+                Ok(SubtitleAnalysis::default())
+            };
+            let _ = sender.send(WorkerMessage::Banks {
+                request,
+                result,
+                subtitles,
+            });
             repaint.request_repaint();
         });
     }
@@ -263,7 +285,11 @@ impl ScModToolApp {
                         });
                     }
                 }
-                WorkerMessage::Banks { request, result } => {
+                WorkerMessage::Banks {
+                    request,
+                    result,
+                    subtitles,
+                } => {
                     if request != self.scan_request {
                         continue;
                     }
@@ -271,6 +297,23 @@ impl ScModToolApp {
                     self.scan_progress = None;
                     match result {
                         Ok(banks) => {
+                            let (subtitle_summary, subtitle_error) = match subtitles {
+                                Ok(analysis) => {
+                                    let summary = (
+                                        analysis.explicit_pairs,
+                                        analysis.mapped_pairs,
+                                        analysis.by_segment.len(),
+                                    );
+                                    self.subtitles = analysis.by_segment;
+                                    self.subtitle_warnings = analysis.warnings;
+                                    (Some(summary), None)
+                                }
+                                Err(error) => {
+                                    self.subtitles.clear();
+                                    self.subtitle_warnings.clear();
+                                    (None, Some(error))
+                                }
+                            };
                             let supported_bank_count = banks
                                 .iter()
                                 .filter(|bank| !bank.segments.is_empty())
@@ -282,22 +325,44 @@ impl ScModToolApp {
                                 .position(|bank| !bank.segments.is_empty())
                                 .or_else(|| (!banks.is_empty()).then_some(0));
                             self.banks = banks;
-                            self.set_status(
-                                format!(
-                                    "Scan complete: {} banks, {} supported segments in {} playable banks.",
-                                    self.banks.len(),
-                                    segment_count,
-                                    supported_bank_count
-                                ),
-                                false,
+                            let mut status = format!(
+                                "Scan complete: {} banks, {} supported segments in {} playable banks.",
+                                self.banks.len(),
+                                segment_count,
+                                supported_bank_count
                             );
+                            if let Some((explicit_pairs, mapped_pairs, segment_count)) =
+                                subtitle_summary
+                            {
+                                status.push_str(&format!(
+                                    " Subtitles: {mapped_pairs}/{explicit_pairs} explicit links mapped to {segment_count} segments."
+                                ));
+                            }
+                            if !self.subtitle_warnings.is_empty() {
+                                status.push_str(&format!(
+                                    " {} analysis warning(s); hover for details.",
+                                    self.subtitle_warnings.len()
+                                ));
+                            }
+                            if let Some(error) = subtitle_error {
+                                self.set_status(
+                                    format!("{status} Subtitle mappings unavailable: {error}"),
+                                    true,
+                                );
+                            } else {
+                                self.set_status(status, false);
+                            }
                         }
                         Err(error) if error == "Scan cancelled." => {
+                            self.subtitles.clear();
+                            self.subtitle_warnings.clear();
                             self.set_status("Bank scan cancelled.", false);
                         }
                         Err(error) => {
                             self.banks.clear();
                             self.selected_bank = None;
+                            self.subtitles.clear();
+                            self.subtitle_warnings.clear();
                             self.set_status(format!("Could not scan banks: {error}"), true);
                         }
                     }
@@ -494,6 +559,29 @@ impl ScModToolApp {
                             ));
                             ui.label(format!("{} bytes", segment.byte_length));
                             ui.monospace(format!("offset {}", segment.offset));
+                            if let Some(subtitles) = self.subtitles.get(&segment.id) {
+                                let text = subtitles
+                                    .iter()
+                                    .map(|subtitle| subtitle.text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let provenance = subtitles
+                                    .iter()
+                                    .map(|subtitle| {
+                                        format!(
+                                            "{} via {} (key 0x{:08X})\n{}",
+                                            subtitle.cue,
+                                            subtitle.sound_event,
+                                            subtitle.sound_map_key,
+                                            subtitle.source
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                ui.label(text).on_hover_text(provenance);
+                            } else {
+                                ui.label("");
+                            }
                             ui.end_row();
                         }
                     });
@@ -536,7 +624,7 @@ impl eframe::App for ScModToolApp {
                     progress.completed, progress.total, progress.bank
                 )));
             }
-            ui.colored_label(
+            let status_response = ui.colored_label(
                 if self.status_is_error {
                     egui::Color32::LIGHT_RED
                 } else {
@@ -544,6 +632,9 @@ impl eframe::App for ScModToolApp {
                 },
                 &self.status,
             );
+            if !self.subtitle_warnings.is_empty() {
+                status_response.on_hover_text(self.subtitle_warnings.join("\n"));
+            }
             ui.small(
                 "Read-only browser. Only recognized mono 4-bit Ubisoft ADPCM streams are playable.",
             );

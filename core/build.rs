@@ -1,5 +1,7 @@
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -29,4 +31,118 @@ fn main() {
         build.flag("-std=c11");
     }
     build.compile("sc1_vgmstream_decoder");
+
+    build_uelib_bridge(&manifest_dir);
+}
+
+fn build_uelib_bridge(manifest_dir: &Path) {
+    let target = env::var("TARGET").unwrap_or_default();
+    let host = env::var("HOST").unwrap_or_default();
+    let (runtime, windows) = match target.as_str() {
+        "x86_64-pc-windows-msvc" => ("win-x64", true),
+        "x86_64-unknown-linux-gnu" => ("linux-x64", false),
+        _ if target.contains("linux") => {
+            panic!("The UELib Native AOT bridge currently supports x86_64-unknown-linux-gnu only.")
+        }
+        _ if target.contains("windows") => {
+            panic!("The UELib Native AOT bridge currently supports x86_64-pc-windows-msvc only.")
+        }
+        _ => return,
+    };
+    if !windows && host != target {
+        panic!(
+            "Build the Linux UELib Native AOT bridge on Linux (for example, from WSL), not via cross-compilation from {host}."
+        );
+    }
+
+    let project = manifest_dir.join("uelib-bridge/UELibBridge.csproj");
+    let source = manifest_dir.join("uelib-bridge/Exports.cs");
+    println!("cargo:rerun-if-changed={}", project.display());
+    println!("cargo:rerun-if-changed={}", source.display());
+
+    let status = Command::new("dotnet")
+        .arg("publish")
+        .arg(&project)
+        .arg("--configuration")
+        .arg("Release")
+        .arg("--runtime")
+        .arg(runtime)
+        .status()
+        .unwrap_or_else(|error| {
+            panic!(
+                "Could not start dotnet to build the {runtime} UELib bridge: {error}. Install the .NET 10 SDK for this host and ensure `dotnet` is on PATH; in WSL, install the Linux SDK inside the distro."
+            )
+        });
+    if !status.success() {
+        panic!("Could not build the UELib Native AOT bridge.");
+    }
+
+    let framework = "net10.0";
+    let output_dir = manifest_dir
+        .join("uelib-bridge/bin/Release")
+        .join(framework)
+        .join(runtime);
+    let publish_dir = manifest_dir
+        .join("uelib-bridge/bin/Release")
+        .join(framework)
+        .join(runtime)
+        .join("publish");
+    let (link_dir, library, runtime_library) = if windows {
+        (
+            output_dir.join("native"),
+            output_dir.join("native/ScModUelibBridge.lib"),
+            publish_dir.join("ScModUelibBridge.dll"),
+        )
+    } else {
+        let published_library = publish_dir.join("ScModUelibBridge.so");
+        let linker_library = publish_dir.join("libScModUelibBridge.so");
+        if !published_library.is_file() {
+            panic!(
+                "The Linux UELib bridge build did not produce {}.",
+                published_library.display()
+            );
+        }
+        fs::copy(&published_library, &linker_library).unwrap_or_else(|error| {
+            panic!(
+                "Could not prepare the Linux UELib bridge for linking at {}: {error}",
+                linker_library.display()
+            )
+        });
+        (publish_dir.clone(), linker_library.clone(), linker_library)
+    };
+    if !library.is_file() || !runtime_library.is_file() {
+        panic!(
+            "The UELib bridge build did not produce {} and {}.",
+            library.display(),
+            runtime_library.display()
+        );
+    }
+
+    println!("cargo:rustc-link-search=native={}", link_dir.display());
+    println!("cargo:rustc-link-lib=dylib=ScModUelibBridge");
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("Cargo OUT_DIR should be under target/<profile>/build");
+    for destination in [profile_dir.to_path_buf(), profile_dir.join("deps")] {
+        fs::create_dir_all(&destination).unwrap_or_else(|error| {
+            panic!(
+                "Could not create UELib bridge runtime directory {}: {error}",
+                destination.display()
+            )
+        });
+        let destination = destination.join(
+            runtime_library
+                .file_name()
+                .expect("bridge runtime library has a filename"),
+        );
+        fs::copy(&runtime_library, &destination).unwrap_or_else(|error| {
+            panic!(
+                "Could not copy the UELib bridge to {}: {error}",
+                destination.display()
+            )
+        });
+    }
 }
