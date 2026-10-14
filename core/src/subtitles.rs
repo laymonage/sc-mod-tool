@@ -4,6 +4,8 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "uelib-bridge")]
+use std::sync::{Mutex, PoisonError};
 
 use encoding_rs::WINDOWS_1252;
 use serde::Deserialize;
@@ -246,6 +248,10 @@ fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
             .ok_or_else(|| format!("Game path is not valid UTF-8: {}", game_root.display()))?;
         let game_root = CString::new(game_root)
             .map_err(|_| "Game path contains an unsupported null character.".to_owned())?;
+        // UELib's decompiler keeps its state in static fields, so concurrent
+        // analyses would corrupt each other's output. Run one at a time.
+        static BRIDGE_LOCK: Mutex<()> = Mutex::new(());
+        let _bridge_guard = BRIDGE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let mut output = vec![0u8; BRIDGE_OUTPUT_CAPACITY];
         let status = unsafe {
             scmod_scan_script_audio_links(
