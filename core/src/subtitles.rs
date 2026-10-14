@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-#[cfg(uelib_bridge)]
+#[cfg(feature = "uelib-bridge")]
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use crate::Error;
 
 const MAP_RECORD_SIZE: usize = 56;
 const MAX_MAP_PADDING_BYTES: u64 = 2;
+#[cfg(feature = "uelib-bridge")]
 const BRIDGE_OUTPUT_CAPACITY: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,7 @@ struct BridgeLink {
 struct BridgeResult {
     links: Vec<BridgeLink>,
     issues: Vec<String>,
+    #[cfg(feature = "uelib-bridge")]
     error: Option<String>,
 }
 
@@ -195,7 +197,7 @@ pub fn load_verified_subtitles(
 }
 
 fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
-    #[cfg(uelib_bridge)]
+    #[cfg(feature = "uelib-bridge")]
     {
         unsafe extern "C" {
             fn scmod_scan_script_audio_links(
@@ -241,12 +243,10 @@ fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
         Ok(result)
     }
 
-    #[cfg(not(uelib_bridge))]
+    #[cfg(not(feature = "uelib-bridge"))]
     {
         let _ = game_root;
-        Err(
-            "Compiled-script subtitle analysis is currently available only in Windows x86-64 MSVC, Linux x86-64 GNU, or macOS builds.".to_owned(),
-        )
+        Err("This build does not include the UELib bridge needed for subtitle matching.".to_owned())
     }
 }
 

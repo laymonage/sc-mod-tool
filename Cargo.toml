@@ -7,8 +7,12 @@ name = "sc-mod-tool"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["uelib-bridge"]
+uelib-bridge = ["sc-mod-tool-core/uelib-bridge"]
+
 [dependencies]
 eframe = { version = "0.31.1", features = ["wgpu"] }
 rfd = "0.15.3"
 rodio = "0.20.1"
-sc-mod-tool-core = { path = "core" }
+sc-mod-tool-core = { path = "core", default-features = false }

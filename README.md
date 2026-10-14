@@ -26,6 +26,10 @@ The Windows x64 build also requires the .NET 10 SDK and MSVC tools for
 publishing the bundled Native AOT UELib bridge. The resulting bridge DLL is
 self-contained and does not require a .NET runtime when the app runs.
 
+The bridge is built by the default `uelib-bridge` feature. To build without
+the .NET SDK, pass `--no-default-features`; the app still browses and plays
+sound banks, but subtitle matching is unavailable.
+
 ```powershell
 git submodule update --init --recursive
 cargo test

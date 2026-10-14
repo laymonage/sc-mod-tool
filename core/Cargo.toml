@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[features]
+default = ["uelib-bridge"]
+# Builds the .NET Native AOT UELib bridge used for subtitle matching, requires .NET 10 SDK.
+uelib-bridge = []
+
 [dependencies]
 encoding_rs = "0.8"
 serde = { version = "1", features = ["derive"] }

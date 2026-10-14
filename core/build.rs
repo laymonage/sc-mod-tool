@@ -32,39 +32,34 @@ fn main() {
     }
     build.compile("sc1_vgmstream_decoder");
 
-    println!("cargo::rustc-check-cfg=cfg(uelib_bridge)");
-    if build_uelib_bridge(&manifest_dir) {
-        println!("cargo::rustc-cfg=uelib_bridge");
+    if env::var_os("CARGO_FEATURE_UELIB_BRIDGE").is_some() {
+        build_uelib_bridge(&manifest_dir);
     }
 }
 
-fn build_uelib_bridge(manifest_dir: &Path) -> bool {
+const WITHOUT_BRIDGE: &str =
+    "To build without subtitle matching, disable the bridge with `--no-default-features`.";
+
+fn build_uelib_bridge(manifest_dir: &Path) {
     let target = env::var("TARGET").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
     let (runtime, platform) = match target.as_str() {
         "x86_64-pc-windows-msvc" => ("win-x64", Platform::Windows),
+        "aarch64-pc-windows-msvc" => ("win-arm64", Platform::Windows),
         "x86_64-unknown-linux-gnu" => ("linux-x64", Platform::Linux),
+        "aarch64-unknown-linux-gnu" => ("linux-arm64", Platform::Linux),
         "aarch64-apple-darwin" => ("osx-arm64", Platform::MacOS),
         "x86_64-apple-darwin" => ("osx-x64", Platform::MacOS),
-        _ if target.contains("linux") => {
-            panic!("The UELib Native AOT bridge currently supports x86_64-unknown-linux-gnu only.")
-        }
-        _ if target.contains("windows") => {
-            panic!("The UELib Native AOT bridge currently supports x86_64-pc-windows-msvc only.")
-        }
-        _ if target.contains("apple") => {
-            panic!(
-                "The UELib Native AOT bridge currently supports aarch64-apple-darwin and x86_64-apple-darwin only."
-            )
-        }
-        _ => return false,
+        _ => panic!(
+            "The UELib Native AOT bridge does not support the {target} target. {WITHOUT_BRIDGE}"
+        ),
     };
     // Native AOT can cross-compile between architectures, but not between
     // operating systems.
     if !platform.is_host(&host) {
         let name = platform.name();
         panic!(
-            "Build the {name} UELib Native AOT bridge on {name}, not via cross-compilation from {host}."
+            "Build the {name} UELib Native AOT bridge on {name}, not via cross-compilation from {host}. {WITHOUT_BRIDGE}"
         );
     }
 
@@ -83,11 +78,11 @@ fn build_uelib_bridge(manifest_dir: &Path) -> bool {
         .status()
         .unwrap_or_else(|error| {
             panic!(
-                "Could not start dotnet to build the {runtime} UELib bridge: {error}. Install the .NET 10 SDK for this host and ensure `dotnet` is on PATH; in WSL, install the Linux SDK inside the distro."
+                "Could not start dotnet to build the {runtime} UELib bridge: {error}. Install the .NET 10 SDK for this host and ensure `dotnet` is on PATH; in WSL, install the Linux SDK inside the distro. {WITHOUT_BRIDGE}"
             )
         });
     if !status.success() {
-        panic!("Could not build the UELib Native AOT bridge.");
+        panic!("Could not build the UELib Native AOT bridge. {WITHOUT_BRIDGE}");
     }
 
     let framework = "net10.0";
@@ -144,7 +139,6 @@ fn build_uelib_bridge(manifest_dir: &Path) -> bool {
             )
         });
     }
-    true
 }
 
 #[derive(Clone, Copy)]
