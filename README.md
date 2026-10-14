@@ -1,61 +1,45 @@
 # SC Mod Tool
 
-Read-only Splinter Cell 1 sound-bank browser built with Rust and egui. It
-discovers language folders from the selected installation, scans numeric
-`.LS0` banks, lists supported mono 4-bit Ubisoft ADPCM segments, and plays a
-selected segment using the upstream vgmstream decoder.
+A read-only browser for Splinter Cell 1 sound banks, built with Rust and egui.
+It lists the mono 4-bit Ubisoft ADPCM segments in each numeric `.LS0` bank,
+plays them with vgmstream's decoder, and shows their subtitles. Game files are
+never modified.
 
-The MVP does not modify game files. It does not claim support for every `.LS0`
-bank, Ubisoft codec, or Unreal `.uax` package. Banks without a recognized
-stream include an explanation in the UI.
+Subtitles come from direct `Localize`/`Sound` pairs in the game's compiled
+UnrealScript, matched to segments through `.uax` sound keys and `MAPS.LM0`.
+Sequence-based associations aren't inferred.
 
-Subtitle links are derived from the selected game's compiled UnrealScript
-references, sound-object map keys in `.uax` packages, and locale-specific
-`MAPS.LM0` records. Cue text is read from the game's localization files.
-Only direct compiled `Localize`/`Sound` pairs are shown; sequence-based
-associations are not inferred. When one sound is referenced by multiple cues,
-the UI shows each possible subtitle with its provenance.
+The `core` crate has no UI code, so it can back CLIs too.
 
-UI-independent parts are placed in `core` to allow for building CLIs.
+## Building
 
-## Windows development
+You need Rust ([rustup](https://rustup.rs)), the
+[.NET 10 SDK](https://dotnet.microsoft.com/download), and a C toolchain:
 
-Build from a Visual Studio developer shell with the x64 C++ tools available:
+- **Windows:** Visual Studio Build Tools with "Desktop development with C++"
+- **macOS:** `xcode-select --install`
+- **Linux:** `sudo apt install build-essential clang zlib1g-dev pkg-config libasound2-dev`
+  (under WSL, install the Linux .NET SDK inside the distribution)
 
-The Windows x64 build also requires the .NET 10 SDK and MSVC tools for
-publishing the bundled Native AOT UELib bridge. The resulting bridge DLL is
-self-contained and does not require a .NET runtime when the app runs.
-
-The bridge is built by the default `uelib-bridge` feature. To build without
-the .NET SDK, pass `--no-default-features`; the app still browses and plays
-sound banks, but subtitle matching is unavailable.
-
-```powershell
+```sh
 git submodule update --init --recursive
 cargo test
-cargo run
+cargo run -- "/path/to/Splinter Cell"  # the folder argument is optional
 ```
 
-To open a game folder straight away, pass it as an argument:
-`cargo run -- "C:\Games\Splinter Cell"`.
+The .NET SDK builds the UELib bridge used for subtitles. It can't be
+cross-compiled to another OS. To build without it, pass
+`--no-default-features`; everything except subtitles still works.
 
-The vgmstream source is pinned as a Git submodule under `vendor/vgmstream`.
-The core crate compiles only the upstream Ubisoft ADPCM decoder and the small
-SC1 segment adapter. Include vgmstream's license and copyright notices when
-redistributing the linked application.
+The bridge library (`SCModUELibBridge.dll`, `libSCModUELibBridge.dylib` or
+`libSCModUELibBridge.so`) is copied next to the executable and must ship with
+it. When redistributing, include vgmstream's license notices.
 
-## Local game-data integration test
+## Game-data test
 
-The full game-data decoder test is ignored during ordinary test runs and in CI.
-Run it explicitly from PowerShell. By default it looks for `../Splinter Cell`
-relative to the app repository root. Set `SC1_GAME_DIR` to override this with
-the game installation or its `Sounds` directory:
+An ignored test decodes every supported segment in a real installation and
+checks the subtitle links. It uses `../Splinter Cell`, or `SC1_GAME_DIR`:
 
-```powershell
+```sh
 cargo test -p sc-mod-tool-core --test game_audio -- --ignored --nocapture
 ```
-
-It scans each discovered language and decodes every segment currently
-recognized as supported, reading each bank once. It verifies decoded sample
-counts and sample rates against the scanner metadata, and verifies dynamically
-derived subtitle links against discovered segment IDs and localized cue text.
