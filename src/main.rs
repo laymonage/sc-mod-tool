@@ -747,7 +747,10 @@ impl eframe::App for SCModToolApp {
             );
         });
 
-        if self.scan_progress.is_some() || self.playback_cancel.is_some() {
+        if self.scan_progress.is_some()
+            || self.playback_cancel.is_some()
+            || self.active_playback.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
