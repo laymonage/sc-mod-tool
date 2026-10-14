@@ -11,7 +11,7 @@ use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer, cpal};
 use sc_mod_tool_core::{
     Bank, Error, Language, Segment,
-    subtitles::{Subtitle, SubtitleAnalysis},
+    subtitles::{CompiledLinks, Subtitle, SubtitleAnalysis},
 };
 
 enum WorkerMessage {
@@ -29,6 +29,7 @@ enum WorkerMessage {
         request: u64,
         result: Result<Vec<Bank>, Error>,
         subtitles: Result<SubtitleAnalysis, Error>,
+        compiled_links: Option<Arc<CompiledLinks>>,
     },
     Playback {
         request: u64,
@@ -72,6 +73,8 @@ struct SCModToolApp {
     audio_output: Option<AudioOutput>,
     subtitles: HashMap<String, Vec<Subtitle>>,
     subtitle_warnings: Vec<String>,
+    /// UELib's analysis of the selected game, reused when switching languages.
+    compiled_links: Option<Arc<CompiledLinks>>,
     status: String,
     status_is_error: bool,
 }
@@ -97,6 +100,7 @@ impl SCModToolApp {
             audio_output: None,
             subtitles: HashMap::new(),
             subtitle_warnings: Vec::new(),
+            compiled_links: None,
             status: "Select the Splinter Cell installation or its Sounds folder.".to_owned(),
             status_is_error: false,
         }
@@ -122,6 +126,7 @@ impl SCModToolApp {
         self.selected_bank = None;
         self.subtitles.clear();
         self.subtitle_warnings.clear();
+        self.compiled_links = None;
         self.scan_progress = None;
         self.language_request = self.language_request.wrapping_add(1);
         let request = self.language_request;
@@ -157,6 +162,7 @@ impl SCModToolApp {
         let request = self.scan_request;
         let cancelled = Arc::new(AtomicBool::new(false));
         self.scan_cancel = Some(Arc::clone(&cancelled));
+        let mut compiled_links = self.compiled_links.clone();
         let sender = self.sender.clone();
         let repaint = ctx.clone();
         self.set_status(format!("Scanning {language} banks..."), false);
@@ -177,7 +183,12 @@ impl SCModToolApp {
                 },
             );
             let subtitles = if let Ok(banks) = &result {
-                sc_mod_tool_core::subtitles::load_verified_subtitles(&root, &language, banks)
+                sc_mod_tool_core::subtitles::load_verified_subtitles(
+                    &root,
+                    &language,
+                    banks,
+                    &mut compiled_links,
+                )
             } else {
                 Ok(SubtitleAnalysis::default())
             };
@@ -185,6 +196,7 @@ impl SCModToolApp {
                 request,
                 result,
                 subtitles,
+                compiled_links,
             });
             repaint.request_repaint();
         });
@@ -297,10 +309,12 @@ impl SCModToolApp {
                     request,
                     result,
                     subtitles,
+                    compiled_links,
                 } => {
                     if request != self.scan_request {
                         continue;
                     }
+                    self.compiled_links = compiled_links;
                     self.scan_cancel = None;
                     self.scan_progress = None;
                     match result {
@@ -498,6 +512,8 @@ impl SCModToolApp {
             }
         }
         if start_scan {
+            // Rescanning re-reads the game files, including its scripts.
+            self.compiled_links = None;
             self.start_scan(ctx);
         }
         if cancel_scan {

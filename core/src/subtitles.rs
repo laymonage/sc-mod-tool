@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use encoding_rs::WINDOWS_1252;
 use serde::Deserialize;
@@ -49,6 +50,16 @@ struct BridgeLink {
     sound_map_key: u32,
 }
 
+/// The game's direct compiled `Localize`/`Sound` references, found by UELib.
+///
+/// They are the same for every language, and finding them is the slow part of
+/// loading subtitles, so callers can keep them between languages of a game.
+#[derive(Debug)]
+pub struct CompiledLinks {
+    links: Vec<BridgeLink>,
+    issues: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct BridgeResult {
     links: Vec<BridgeLink>,
@@ -64,14 +75,23 @@ struct MapRecord {
     sample_count: u32,
 }
 
+/// Matches `language`'s sound banks to subtitle cues.
+///
+/// `compiled_links` caches the UELib analysis for the game at `root`. Pass
+/// `None` to run it (it is then filled in), or a value from an earlier call for
+/// the same game root to reuse it.
 pub fn load_verified_subtitles(
     root: &Path,
     language: &str,
     banks: &[super::Bank],
+    compiled_links: &mut Option<Arc<CompiledLinks>>,
 ) -> Result<SubtitleAnalysis, Error> {
     if language == "." {
         return Ok(SubtitleAnalysis::default());
     }
+    let extension = localization_extension(language).ok_or_else(|| {
+        format!("Subtitle localization extension is not known for language {language}.")
+    })?;
 
     let sounds = super::find_sounds_directory(root)?;
     let game_root = sounds.parent().ok_or_else(|| {
@@ -86,7 +106,18 @@ pub fn load_verified_subtitles(
         .map_err(|error| format!("Could not read {}: {error}", map_path.display()))?;
     let map_records = parse_map_records(&map_data);
 
-    let bridge = scan_compiled_links(game_root)?;
+    let bridge = match compiled_links {
+        Some(links) => Arc::clone(links),
+        None => {
+            let result = scan_compiled_links(game_root)?;
+            compiled_links
+                .insert(Arc::new(CompiledLinks {
+                    links: result.links,
+                    issues: result.issues,
+                }))
+                .clone()
+        }
+    };
     let mut analysis = SubtitleAnalysis {
         explicit_pairs: bridge.links.len(),
         ..SubtitleAnalysis::default()
@@ -112,8 +143,8 @@ pub fn load_verified_subtitles(
 
     let localization_root = game_root.join("system").join("LOCALIZATION");
     let mut localization_cache = HashMap::<PathBuf, String>::new();
-    for link in bridge.links {
-        let segment = match resolve_segment(&link, &map_records, banks) {
+    for link in &bridge.links {
+        let segment = match resolve_segment(link, &map_records, banks) {
             Ok(segment) => segment,
             Err(warning) => {
                 push_warning(&mut analysis.warnings, warning);
@@ -122,7 +153,7 @@ pub fn load_verified_subtitles(
         };
 
         let localization_path =
-            match localization_path(&localization_root, &link.localization_file, language) {
+            match localization_path(&localization_root, &link.localization_file, extension) {
                 Ok(path) => path,
                 Err(warning) => {
                     push_warning(&mut analysis.warnings, warning);
@@ -173,10 +204,10 @@ pub fn load_verified_subtitles(
             }
         } else {
             subtitles.push(Subtitle {
-                cue: link.cue,
+                cue: link.cue.clone(),
                 text,
                 source,
-                sound_event: link.sound_event,
+                sound_event: link.sound_event.clone(),
                 sound_map_key: link.sound_map_key,
                 confidence: MappingConfidence::ExplicitCompiledReference,
             });
@@ -360,20 +391,22 @@ fn sound_package_bank_code(sound_event: &str) -> Option<String> {
     Some(code.to_owned())
 }
 
+fn localization_extension(language: &str) -> Option<&'static str> {
+    match language.to_ascii_uppercase().as_str() {
+        "ENGLISH" => Some("int"),
+        "FRENCH" => Some("fra"),
+        "GERMAN" => Some("deu"),
+        "ITALIAN" => Some("ita"),
+        "SPANISH" => Some("esp"),
+        _ => None,
+    }
+}
+
 fn localization_path(
     localization_root: &Path,
     base_name: &str,
-    language: &str,
+    extension: &str,
 ) -> Result<PathBuf, String> {
-    let extension = match language.to_ascii_uppercase().as_str() {
-        "ENGLISH" => "int",
-        "GERMAN" => "deu",
-        _ => {
-            return Err(format!(
-                "Subtitle localization extension is not known for language {language}."
-            ));
-        }
-    };
     let file_name = format!("{base_name}.{extension}");
     let exact_path = localization_root.join(&file_name);
     if exact_path.is_file() {
@@ -516,6 +549,23 @@ mod tests {
         let duplicate = "[Pilot]\nSpeech_0001L=First\nSpeech_0001L=Second\n";
         assert!(find_cue(duplicate, "Pilot", "Speech_0001L").is_err());
         assert!(find_cue("[Pilot]\n", "Pilot", "Speech_0001L").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_languages_before_running_uelib() {
+        let mut compiled_links = None;
+        let error = load_verified_subtitles(
+            Path::new("missing-game"),
+            "KLINGON",
+            &[],
+            &mut compiled_links,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Subtitle localization extension is not known for language KLINGON."
+        );
+        assert!(compiled_links.is_none());
     }
 
     fn write_u32(data: &mut [u8], position: usize, value: u32) {

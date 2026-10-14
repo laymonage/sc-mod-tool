@@ -43,14 +43,18 @@ fn decodes_every_discovered_game_segment() {
     let languages = discover_languages(&game_root)
         .unwrap_or_else(|error| panic!("Could not discover game languages: {error}"));
     let cancelled = AtomicBool::new(false);
+    let mut compiled_links = None;
     let mut total_banks = 0;
     let mut total_segments = 0;
 
     for language in languages {
         let banks = discover_banks(&game_root, &language.directory)
             .unwrap_or_else(|error| panic!("Could not scan {}: {error}", language.label));
-        let subtitles = load_verified_subtitles(&game_root, &language.directory, &banks)
-            .unwrap_or_else(|error| panic!("Could not load {} subtitles: {error}", language.label));
+        let subtitles =
+            load_verified_subtitles(&game_root, &language.directory, &banks, &mut compiled_links)
+                .unwrap_or_else(|error| {
+                    panic!("Could not load {} subtitles: {error}", language.label)
+                });
         if language.directory.eq_ignore_ascii_case("ENGLISH")
             || language.directory.eq_ignore_ascii_case("GERMAN")
         {
