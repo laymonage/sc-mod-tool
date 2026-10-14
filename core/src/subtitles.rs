@@ -62,7 +62,10 @@ pub struct CompiledLinks {
 
 #[derive(Debug, Deserialize)]
 struct BridgeResult {
+    // A failed analysis returns only `error`.
+    #[serde(default)]
     links: Vec<BridgeLink>,
+    #[serde(default)]
     issues: Vec<String>,
     #[cfg(feature = "uelib-bridge")]
     error: Option<String>,
@@ -566,6 +569,22 @@ mod tests {
             "Subtitle localization extension is not known for language KLINGON."
         );
         assert!(compiled_links.is_none());
+    }
+
+    #[cfg(feature = "uelib-bridge")]
+    #[test]
+    fn reports_the_bridge_error_message() {
+        let game = crate::tests::TempDir::new();
+        let english = game.path().join("Sounds/ENGLISH");
+        fs::create_dir_all(&english).unwrap();
+        fs::write(english.join("MAPS.LM0"), []).unwrap();
+
+        let error = load_verified_subtitles(game.path(), "ENGLISH", &[], &mut None).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.starts_with("Game system directory was not found: "),
+            "{message}"
+        );
     }
 
     fn write_u32(data: &mut [u8], position: usize, value: u32) {

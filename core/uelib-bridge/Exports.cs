@@ -27,7 +27,7 @@ public static unsafe class Exports
         }
         catch (Exception error)
         {
-            return WriteFailure(outputUtf8, outputCapacity, error.ToString());
+            return WriteFailure(outputUtf8, outputCapacity, error.Message);
         }
     }
 
