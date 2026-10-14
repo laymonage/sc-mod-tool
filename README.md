@@ -28,7 +28,6 @@ self-contained and does not require a .NET runtime when the app runs.
 
 ```powershell
 git submodule update --init --recursive
-cargo test --manifest-path core\Cargo.toml
 cargo test
 cargo run
 ```
@@ -46,7 +45,7 @@ relative to the app repository root. Set `SC1_GAME_DIR` to override this with
 the game installation or its `Sounds` directory:
 
 ```powershell
-cargo test --manifest-path core\Cargo.toml --test game_audio -- --ignored --nocapture
+cargo test -p sc-mod-tool-core --test game_audio -- --ignored --nocapture
 ```
 
 It scans each discovered language and decodes every segment currently

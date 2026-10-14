@@ -1,3 +1,7 @@
+[workspace]
+members = ["core"]
+default-members = [".", "core"]
+
 [package]
 name = "sc-mod-tool"
 version = "0.1.0"
