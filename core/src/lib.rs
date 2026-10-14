@@ -1,5 +1,8 @@
 pub mod decoder;
+mod error;
 pub mod subtitles;
+
+pub use error::Error;
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -41,7 +44,7 @@ pub struct Segment {
     pub segment: usize,
 }
 
-pub fn discover_languages(root: &Path) -> Result<Vec<Language>, String> {
+pub fn discover_languages(root: &Path) -> Result<Vec<Language>, Error> {
     let sounds = find_sounds_directory(root)?;
     let entries = read_directory(&sounds)?;
     let mut languages = Vec::new();
@@ -90,12 +93,13 @@ pub fn discover_languages(root: &Path) -> Result<Vec<Language>, String> {
         return Err(format!(
             "No numeric .LS0 sound banks were found under {}.",
             sounds.display()
-        ));
+        )
+        .into());
     }
     Ok(languages)
 }
 
-pub fn discover_banks(root: &Path, language: &str) -> Result<Vec<Bank>, String> {
+pub fn discover_banks(root: &Path, language: &str) -> Result<Vec<Bank>, Error> {
     static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
     discover_banks_with_progress(root, language, &NEVER_CANCELLED, |_, _, _| {})
 }
@@ -105,14 +109,14 @@ pub fn discover_banks_with_progress(
     language: &str,
     cancelled: &AtomicBool,
     mut progress: impl FnMut(usize, usize, &str),
-) -> Result<Vec<Bank>, String> {
+) -> Result<Vec<Bank>, Error> {
     let sounds = find_sounds_directory(root)?;
     let language_root = if language == "." {
         sounds.clone()
     } else {
         let language_path = safe_child_path(&sounds, language)?;
         if !language_path.is_dir() {
-            return Err(format!("Language folder was not found: {language}"));
+            return Err(format!("Language folder was not found: {language}").into());
         }
         language_path
     };
@@ -131,7 +135,7 @@ pub fn discover_banks_with_progress(
     progress(0, total, "");
     for (index, (absolute_path, relative_path)) in files.into_iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
-            return Err("Scan cancelled.".to_owned());
+            return Err(Error::Cancelled);
         }
         let bytes = fs::read(&absolute_path)
             .map_err(|error| format!("Could not read {}: {error}", absolute_path.display()))?;
@@ -169,7 +173,7 @@ pub fn read_segment(
     relative_path: &str,
     offset: u64,
     byte_length: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     read_segment_inner(root, relative_path, offset, byte_length, None)
 }
 
@@ -179,7 +183,7 @@ pub fn read_segment_with_cancel(
     offset: u64,
     byte_length: u64,
     cancelled: &AtomicBool,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     read_segment_inner(root, relative_path, offset, byte_length, Some(cancelled))
 }
 
@@ -189,7 +193,7 @@ fn read_segment_inner(
     offset: u64,
     byte_length: u64,
     cancelled: Option<&AtomicBool>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, Error> {
     let sounds = find_sounds_directory(root)?;
     let file_path = safe_child_path(&sounds, relative_path)?;
     let mut file = fs::File::open(&file_path)
@@ -201,7 +205,8 @@ fn read_segment_inner(
         return Err(format!(
             "The requested segment source is not a file: {}",
             file_path.display()
-        ));
+        )
+        .into());
     }
     let end = offset
         .checked_add(byte_length)
@@ -211,13 +216,14 @@ fn read_segment_inner(
             "Segment range {offset}..{end} exceeds {} ({} bytes).",
             file_path.display(),
             metadata.len()
-        ));
+        )
+        .into());
     }
 
     let length = usize::try_from(byte_length)
         .map_err(|_| "Segment length is too large to read.".to_owned())?;
     if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        return Err("Playback cancelled.".to_owned());
+        return Err(Error::Cancelled);
     }
     let mut bytes = Vec::new();
     bytes
@@ -231,7 +237,7 @@ fn read_segment_inner(
     const READ_CHUNK_SIZE: usize = 64 * 1024;
     for chunk in bytes.chunks_mut(READ_CHUNK_SIZE) {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-            return Err("Playback cancelled.".to_owned());
+            return Err(Error::Cancelled);
         }
         file.read_exact(chunk).map_err(|error| {
             format!(
@@ -241,7 +247,7 @@ fn read_segment_inner(
         })?;
     }
     if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        return Err("Playback cancelled.".to_owned());
+        return Err(Error::Cancelled);
     }
 
     Ok(bytes)
@@ -373,7 +379,7 @@ fn scan_bank(
     language: &str,
     code: &str,
     cancelled: &AtomicBool,
-) -> Result<Vec<Segment>, String> {
+) -> Result<Vec<Segment>, Error> {
     let mut segments: Vec<Segment> = Vec::new();
     let mut offset = 0usize;
 
@@ -382,7 +388,7 @@ fn scan_bank(
         .is_some_and(|end| end <= bytes.len())
     {
         if offset & 0x0fff == 0 && cancelled.load(Ordering::Relaxed) {
-            return Err("Scan cancelled.".to_owned());
+            return Err(Error::Cancelled);
         }
         if read_u32_le(bytes, offset) != Some(8) {
             offset += 1;
@@ -437,7 +443,7 @@ fn scan_bank(
 
         while subframe_number < subframe_count {
             if cancelled.load(Ordering::Relaxed) {
-                return Err("Scan cancelled.".to_owned());
+                return Err(Error::Cancelled);
             }
             if !has_valid_frame(bytes, frame_offset) {
                 valid_frames = false;
@@ -517,7 +523,7 @@ fn scan_bank(
         last.byte_length = (bytes.len() - last.offset as usize) as u64;
     }
     if cancelled.load(Ordering::Relaxed) {
-        return Err("Scan cancelled.".to_owned());
+        return Err(Error::Cancelled);
     }
     Ok(segments)
 }
@@ -675,7 +681,7 @@ mod tests {
 
         let error = discover_banks_with_progress(game.path(), "ENGLISH", &cancelled, |_, _, _| {})
             .unwrap_err();
-        assert_eq!(error, "Scan cancelled.");
+        assert_eq!(error, Error::Cancelled);
     }
 
     #[test]
@@ -740,6 +746,6 @@ mod tests {
 
         let error = read_segment_with_cancel(game.path(), "ENGLISH/1_1_0.LS0", 0, 103, &cancelled)
             .unwrap_err();
-        assert_eq!(error, "Playback cancelled.");
+        assert_eq!(error, Error::Cancelled);
     }
 }

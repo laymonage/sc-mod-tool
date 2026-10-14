@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use encoding_rs::WINDOWS_1252;
 use serde::Deserialize;
 
+use crate::Error;
+
 const MAP_RECORD_SIZE: usize = 56;
 const MAX_MAP_PADDING_BYTES: u64 = 2;
 const BRIDGE_OUTPUT_CAPACITY: usize = 16 * 1024 * 1024;
@@ -64,7 +66,7 @@ pub fn load_verified_subtitles(
     root: &Path,
     language: &str,
     banks: &[super::Bank],
-) -> Result<SubtitleAnalysis, String> {
+) -> Result<SubtitleAnalysis, Error> {
     if language == "." {
         return Ok(SubtitleAnalysis::default());
     }

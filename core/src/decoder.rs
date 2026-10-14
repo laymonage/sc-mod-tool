@@ -1,6 +1,8 @@
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::Error;
+
 unsafe extern "C" {
     fn decode_sc1_ubi_adpcm(
         input: *const u8,
@@ -32,13 +34,13 @@ pub fn decode(
     input: &[u8],
     sample_count: u32,
     cancelled: &AtomicBool,
-) -> Result<DecodedAudio, String> {
+) -> Result<DecodedAudio, Error> {
     let input_size =
         u32::try_from(input.len()).map_err(|_| "Compressed segment is too large to decode.")?;
     let output_size =
         usize::try_from(sample_count).map_err(|_| "Sample count is too large to decode.")?;
     if output_size == 0 {
-        return Err("The segment has no audio samples.".to_owned());
+        return Err("The segment has no audio samples.".into());
     }
 
     let mut samples = vec![0_i16; output_size];
@@ -55,18 +57,19 @@ pub fn decode(
         )
     };
     if decoded == -2 {
-        return Err("Playback cancelled.".to_owned());
+        return Err(Error::Cancelled);
     }
     if decoded < 0 {
-        return Err("vgmstream rejected the SC1 mono 4-bit ADPCM segment.".to_owned());
+        return Err("vgmstream rejected the SC1 mono 4-bit ADPCM segment.".into());
     }
     if decoded as u32 != sample_count {
         return Err(format!(
             "Expected {sample_count} decoded samples, but vgmstream returned {decoded}."
-        ));
+        )
+        .into());
     }
     if sample_rate == 0 {
-        return Err("vgmstream returned an invalid sample rate.".to_owned());
+        return Err("vgmstream returned an invalid sample rate.".into());
     }
 
     Ok(DecodedAudio {
@@ -128,9 +131,6 @@ mod tests {
         }
         let cancelled = AtomicBool::new(true);
 
-        assert_eq!(
-            decode(&bytes, 4, &cancelled).unwrap_err(),
-            "Playback cancelled."
-        );
+        assert_eq!(decode(&bytes, 4, &cancelled).unwrap_err(), Error::Cancelled);
     }
 }

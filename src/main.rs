@@ -9,14 +9,14 @@ use std::time::Duration;
 use eframe::egui;
 use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer};
 use sc_mod_tool_core::{
-    Bank, Language, Segment,
+    Bank, Error, Language, Segment,
     subtitles::{Subtitle, SubtitleAnalysis},
 };
 
 enum WorkerMessage {
     Languages {
         request: u64,
-        result: Result<Vec<Language>, String>,
+        result: Result<Vec<Language>, Error>,
     },
     ScanProgress {
         request: u64,
@@ -26,13 +26,13 @@ enum WorkerMessage {
     },
     Banks {
         request: u64,
-        result: Result<Vec<Bank>, String>,
-        subtitles: Result<SubtitleAnalysis, String>,
+        result: Result<Vec<Bank>, Error>,
+        subtitles: Result<SubtitleAnalysis, Error>,
     },
     Playback {
         request: u64,
         segment_id: String,
-        result: Result<sc_mod_tool_core::decoder::DecodedAudio, String>,
+        result: Result<sc_mod_tool_core::decoder::DecodedAudio, Error>,
     },
 }
 
@@ -209,7 +209,7 @@ impl ScModToolApp {
 
         thread::spawn(move || {
             let result = if cancelled.load(Ordering::Relaxed) {
-                Err("Playback cancelled.".to_owned())
+                Err(Error::Cancelled)
             } else {
                 sc_mod_tool_core::read_segment_with_cancel(
                     &root,
@@ -220,7 +220,7 @@ impl ScModToolApp {
                 )
                 .and_then(|bytes| {
                     if cancelled.load(Ordering::Relaxed) {
-                        return Err("Playback cancelled.".to_owned());
+                        return Err(Error::Cancelled);
                     }
                     sc_mod_tool_core::decoder::decode(&bytes, expected_samples, &cancelled)
                 })
@@ -353,7 +353,7 @@ impl ScModToolApp {
                                 self.set_status(status, false);
                             }
                         }
-                        Err(error) if error == "Scan cancelled." => {
+                        Err(Error::Cancelled) => {
                             self.subtitles.clear();
                             self.subtitle_warnings.clear();
                             self.set_status("Bank scan cancelled.", false);
@@ -386,7 +386,7 @@ impl ScModToolApp {
                                 self.set_status(format!("Could not start playback: {error}"), true);
                             }
                         },
-                        Err(error) if error == "Playback cancelled." => {}
+                        Err(Error::Cancelled) => {}
                         Err(error) => {
                             self.set_status(format!("Could not decode segment: {error}"), true)
                         }
