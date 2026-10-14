@@ -84,21 +84,7 @@ mod tests {
 
     #[test]
     fn decodes_a_minimal_mono_ubi_adpcm_segment() {
-        let mut bytes = vec![0; 103];
-        for (offset, value) in [
-            (0, 8_u32),
-            (4, 4),
-            (8, 1),
-            (12, 4),
-            (16, 4),
-            (20, 2),
-            (24, 36000),
-            (36, 4),
-            (44, 1),
-            (48, 2),
-        ] {
-            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        }
+        let bytes = crate::tests::make_segment();
 
         let cancelled = AtomicBool::new(false);
         let decoded = decode(&bytes, 4, &cancelled).unwrap();
@@ -114,21 +100,7 @@ mod tests {
 
     #[test]
     fn honours_cancellation_during_native_decode() {
-        let mut bytes = vec![0; 103];
-        for (offset, value) in [
-            (0, 8_u32),
-            (4, 4),
-            (8, 1),
-            (12, 4),
-            (16, 4),
-            (20, 2),
-            (24, 36000),
-            (36, 4),
-            (44, 1),
-            (48, 2),
-        ] {
-            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-        }
+        let bytes = crate::tests::make_segment();
         let cancelled = AtomicBool::new(true);
 
         assert_eq!(decode(&bytes, 4, &cancelled).unwrap_err(), Error::Cancelled);

@@ -64,9 +64,11 @@ fn build_uelib_bridge(manifest_dir: &Path) {
     }
 
     let project = manifest_dir.join("uelib-bridge/UELibBridge.csproj");
-    let source = manifest_dir.join("uelib-bridge/Exports.cs");
     println!("cargo:rerun-if-changed={}", project.display());
-    println!("cargo:rerun-if-changed={}", source.display());
+    for source in ["Exports.cs", "DirectPairs.cs"] {
+        let source = manifest_dir.join("uelib-bridge").join(source);
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
 
     let status = Command::new("dotnet")
         .arg("publish")

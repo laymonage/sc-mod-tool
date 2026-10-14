@@ -3160,6 +3160,7 @@ dependencies = [
  "encoding_rs",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

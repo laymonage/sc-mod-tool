@@ -24,6 +24,7 @@ You need Rust ([rustup](https://rustup.rs)), the
 ```sh
 git submodule update --init --recursive
 cargo test
+dotnet test core/uelib-bridge-tests    # the bridge's script matcher
 cargo run -- "/path/to/Splinter Cell"  # the folder argument is optional
 ```
 

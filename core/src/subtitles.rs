@@ -580,7 +580,7 @@ mod tests {
     #[cfg(feature = "uelib-bridge")]
     #[test]
     fn reports_the_bridge_error_message() {
-        let game = crate::tests::TempDir::new();
+        let game = tempfile::tempdir().unwrap();
         let english = game.path().join("Sounds/ENGLISH");
         fs::create_dir_all(&english).unwrap();
         fs::write(english.join("MAPS.LM0"), []).unwrap();

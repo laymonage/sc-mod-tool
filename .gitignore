@@ -1,3 +1,5 @@
 target/
 /core/uelib-bridge/bin/
 /core/uelib-bridge/obj/
+/core/uelib-bridge-tests/bin/
+/core/uelib-bridge-tests/obj/

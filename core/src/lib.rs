@@ -552,43 +552,13 @@ fn diagnose_unrecognized_bank(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-    pub(crate) struct TempDir(PathBuf);
-
-    impl TempDir {
-        pub(crate) fn new() -> Self {
-            let time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "sc-mod-tool-test-{}-{time}-{sequence}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        pub(crate) fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
-        }
-    }
-
-    fn make_segment() -> Vec<u8> {
+    /// A minimal valid segment: one mono 4-bit subframe of four samples at
+    /// 36 kHz, followed by its frame header and code bytes.
+    pub(crate) fn make_segment() -> Vec<u8> {
         let mut bytes = vec![0; 103];
         for (offset, value) in [
-            (0, 8u32),
+            (0, 8_u32),
             (4, 4),
             (8, 1),
             (12, 4),
@@ -673,7 +643,7 @@ mod tests {
 
     #[test]
     fn rejects_cancelled_bank_scans() {
-        let game = TempDir::new();
+        let game = tempfile::tempdir().unwrap();
         let english = game.path().join("Sounds/ENGLISH");
         fs::create_dir_all(&english).unwrap();
         fs::write(english.join("1_1_0.LS0"), make_segment()).unwrap();
@@ -686,7 +656,7 @@ mod tests {
 
     #[test]
     fn discovers_languages_and_banks_from_selected_game_directory() {
-        let game = TempDir::new();
+        let game = tempfile::tempdir().unwrap();
         let english = game.path().join("Sounds/ENGLISH");
         let german = game.path().join("Sounds/GERMAN");
         fs::create_dir_all(&english).unwrap();
@@ -724,7 +694,7 @@ mod tests {
 
     #[test]
     fn segment_reads_are_bounded_to_the_sounds_directory() {
-        let game = TempDir::new();
+        let game = tempfile::tempdir().unwrap();
         let sounds = game.path().join("Sounds/ENGLISH");
         fs::create_dir_all(&sounds).unwrap();
         fs::write(sounds.join("1_1_0.LS0"), make_segment()).unwrap();
@@ -738,7 +708,7 @@ mod tests {
 
     #[test]
     fn segment_read_honours_cancellation() {
-        let game = TempDir::new();
+        let game = tempfile::tempdir().unwrap();
         let sounds = game.path().join("Sounds/ENGLISH");
         fs::create_dir_all(&sounds).unwrap();
         fs::write(sounds.join("1_1_0.LS0"), make_segment()).unwrap();
