@@ -654,7 +654,7 @@ impl SCModToolApp {
                                             subtitle.cue,
                                             subtitle.sound_event,
                                             subtitle.sound_map_key,
-                                            subtitle.source
+                                            subtitle.sources.join("\n")
                                         )
                                     })
                                     .collect::<Vec<_>>()

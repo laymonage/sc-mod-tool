@@ -26,7 +26,8 @@ pub enum MappingConfidence {
 pub struct Subtitle {
     pub cue: String,
     pub text: String,
-    pub source: String,
+    /// The compiled script objects that reference this cue and sound.
+    pub sources: Vec<String>,
     pub sound_event: String,
     pub sound_map_key: u32,
     pub confidence: MappingConfidence,
@@ -203,15 +204,14 @@ pub fn load_verified_subtitles(
                 && subtitle.sound_event.eq_ignore_ascii_case(&link.sound_event)
                 && subtitle.sound_map_key == link.sound_map_key
         }) {
-            if !existing.source.contains(&source) {
-                existing.source.push_str("\n");
-                existing.source.push_str(&source);
+            if !existing.sources.contains(&source) {
+                existing.sources.push(source);
             }
         } else {
             subtitles.push(Subtitle {
                 cue: link.cue.clone(),
                 text,
-                source,
+                sources: vec![source],
                 sound_event: link.sound_event.clone(),
                 sound_map_key: link.sound_map_key,
                 confidence: MappingConfidence::ExplicitCompiledReference,
