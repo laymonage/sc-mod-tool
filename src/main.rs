@@ -7,7 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer};
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
+use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer, cpal};
 use sc_mod_tool_core::{
     Bank, Error, Language, Segment,
     subtitles::{Subtitle, SubtitleAnalysis},
@@ -43,9 +44,14 @@ struct ScanProgress {
 }
 
 struct ActivePlayback {
-    _stream: OutputStream,
     sink: Sink,
     segment_id: String,
+}
+
+struct AudioOutput {
+    device_name: Option<String>,
+    _stream: OutputStream,
+    handle: OutputStreamHandle,
 }
 
 struct SCModToolApp {
@@ -63,6 +69,7 @@ struct SCModToolApp {
     playback_cancel: Option<Arc<AtomicBool>>,
     scan_progress: Option<ScanProgress>,
     active_playback: Option<ActivePlayback>,
+    audio_output: Option<AudioOutput>,
     subtitles: HashMap<String, Vec<Subtitle>>,
     subtitle_warnings: Vec<String>,
     status: String,
@@ -87,6 +94,7 @@ impl SCModToolApp {
             playback_cancel: None,
             scan_progress: None,
             active_playback: None,
+            audio_output: None,
             subtitles: HashMap::new(),
             subtitle_warnings: Vec::new(),
             status: "Select the Splinter Cell installation or its Sounds folder.".to_owned(),
@@ -377,7 +385,7 @@ impl SCModToolApp {
                     }
                     self.playback_cancel = None;
                     match result {
-                        Ok(audio) => match start_audio(audio, segment_id.clone()) {
+                        Ok(audio) => match self.start_audio(audio, segment_id.clone()) {
                             Ok(playback) => {
                                 self.active_playback = Some(playback);
                                 self.set_status(format!("Playing segment {segment_id}."), false);
@@ -394,6 +402,33 @@ impl SCModToolApp {
                 }
             }
         }
+    }
+
+    fn start_audio(
+        &mut self,
+        audio: sc_mod_tool_core::decoder::DecodedAudio,
+        segment_id: String,
+    ) -> Result<ActivePlayback, String> {
+        let device_name = cpal::default_host()
+            .default_output_device()
+            .and_then(|device| device.name().ok());
+        let output = match &self.audio_output {
+            Some(output) if output.device_name == device_name => output,
+            _ => {
+                // Close the old stream before opening the new device.
+                self.audio_output = None;
+                let (stream, handle) =
+                    OutputStream::try_default().map_err(|error| error.to_string())?;
+                self.audio_output.insert(AudioOutput {
+                    device_name,
+                    _stream: stream,
+                    handle,
+                })
+            }
+        };
+        let sink = Sink::try_new(&output.handle).map_err(|error| error.to_string())?;
+        sink.append(SamplesBuffer::new(1, audio.sample_rate, audio.samples));
+        Ok(ActivePlayback { sink, segment_id })
     }
 
     fn set_status(&mut self, status: impl Into<String>, is_error: bool) {
@@ -700,21 +735,6 @@ impl eframe::App for SCModToolApp {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
-}
-
-fn start_audio(
-    audio: sc_mod_tool_core::decoder::DecodedAudio,
-    segment_id: String,
-) -> Result<ActivePlayback, String> {
-    let (stream, handle): (OutputStream, OutputStreamHandle) =
-        OutputStream::try_default().map_err(|error| error.to_string())?;
-    let sink = Sink::try_new(&handle).map_err(|error| error.to_string())?;
-    sink.append(SamplesBuffer::new(1, audio.sample_rate, audio.samples));
-    Ok(ActivePlayback {
-        _stream: stream,
-        sink,
-        segment_id,
-    })
 }
 
 fn main() -> eframe::Result<()> {
