@@ -13,7 +13,6 @@ use serde::Deserialize;
 use crate::Error;
 
 const MAP_RECORD_SIZE: usize = 56;
-const MAX_MAP_PADDING_BYTES: u64 = 2;
 #[cfg(feature = "uelib-bridge")]
 const BRIDGE_OUTPUT_CAPACITY: usize = 16 * 1024 * 1024;
 
@@ -357,10 +356,7 @@ fn resolve_segment<'a>(
             for segment in &bank.segments {
                 if segment.offset == u64::from(record.offset)
                     && segment.sample_count == record.sample_count
-                    && segment
-                        .byte_length
-                        .abs_diff(u64::from(record.compressed_bytes))
-                        <= MAX_MAP_PADDING_BYTES
+                    && segment.byte_length == u64::from(record.compressed_bytes)
                     && !matches
                         .iter()
                         .any(|matched: &&super::Segment| matched.id == segment.id)

@@ -36,6 +36,8 @@ pub struct Segment {
     pub bank: String,
     pub code: String,
     pub offset: u64,
+    /// The length of the stream itself. Banks pad streams to 4-byte
+    /// boundaries, and the padding isn't included.
     pub byte_length: u64,
     pub sample_count: u32,
     pub sample_rate: u32,
@@ -500,9 +502,6 @@ fn scan_bank(
             continue;
         }
 
-        if let Some(previous) = segments.last_mut() {
-            previous.byte_length = (offset - previous.offset as usize) as u64;
-        }
         segments.push(Segment {
             id: format!("{bank_path}:{offset}"),
             language: language.to_owned(),
@@ -519,9 +518,6 @@ fn scan_bank(
         offset = frame_offset;
     }
 
-    if let Some(last) = segments.last_mut() {
-        last.byte_length = (bytes.len() - last.offset as usize) as u64;
-    }
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
@@ -596,7 +592,7 @@ mod tests {
         assert_eq!(segments[0].offset, 0);
         assert_eq!(segments[0].id, "ENGLISH/1_2.LS0:0");
         assert_eq!(segments[0].language, "ENGLISH");
-        assert_eq!(segments[0].byte_length, 108);
+        assert_eq!(segments[0].byte_length, 103);
         assert_eq!(segments[0].sample_count, 4);
         assert_eq!(segments[0].sample_rate, 36000);
         assert_eq!(segments[0].channels, 1);
