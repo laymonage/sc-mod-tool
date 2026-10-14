@@ -11,6 +11,7 @@
        project and its UELib dependency. -->
   <ItemGroup>
     <Compile Include="../uelib-bridge/DirectPairs.cs" Link="DirectPairs.cs" />
+    <Compile Include="../uelib-bridge/SoundData.cs" Link="SoundData.cs" />
   </ItemGroup>
 
   <ItemGroup>

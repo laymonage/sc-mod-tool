@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -89,56 +88,48 @@ public static unsafe class Exports
 
         var soundPackages = new Dictionary<string, SoundPackage>(StringComparer.OrdinalIgnoreCase);
         var links = new List<BridgeLink>();
-        try
+        foreach (var pair in sourcePairs)
         {
-            foreach (var pair in sourcePairs)
+            if (!soundPackages.TryGetValue(pair.SoundPackage, out var soundPackage))
             {
-                if (!soundPackages.TryGetValue(pair.SoundPackage, out var soundPackage))
+                var path = FindPackagePath(soundsRoot, pair.SoundPackage + ".uax");
+                if (path is null)
                 {
-                    var path = FindPackagePath(soundsRoot, pair.SoundPackage + ".uax");
-                    if (path is null)
-                    {
-                        issues.Add($"Sound package was not found for {pair.SoundPackage}.{pair.SoundEvent}.");
-                        continue;
-                    }
-
-                    try
-                    {
-                        var package = UnrealLoader.LoadPackage(path, FileAccess.Read);
-                        package.InitializePackage(
-                            UnrealPackage.InitFlags.Construct | UnrealPackage.InitFlags.RegisterClasses);
-                        soundPackage = new SoundPackage(package, File.ReadAllBytes(path), path);
-                        soundPackages.Add(pair.SoundPackage, soundPackage);
-                    }
-                    catch (Exception error)
-                    {
-                        issues.Add($"Could not load sound package {path}: {error.Message}");
-                        continue;
-                    }
-                }
-
-                if (!TryReadSoundMapKey(soundPackage, pair.SoundEvent, out var key, out var issue))
-                {
-                    issues.Add(issue);
+                    issues.Add($"Sound package was not found for {pair.SoundPackage}.{pair.SoundEvent}.");
                     continue;
                 }
 
-                links.Add(new BridgeLink(
-                    pair.SourcePackage,
-                    pair.SourceObject,
-                    pair.Section,
-                    pair.Cue,
-                    pair.LocalizationFile,
-                    pair.SoundPackage + "." + pair.SoundEvent,
-                    key));
+                try
+                {
+                    soundPackage = ReadSoundPackage(path);
+                    soundPackages.Add(pair.SoundPackage, soundPackage);
+                }
+                catch (Exception error)
+                {
+                    issues.Add($"Could not load sound package {path}: {error.Message}");
+                    continue;
+                }
             }
-        }
-        finally
-        {
-            foreach (var soundPackage in soundPackages.Values)
+
+            if (!soundPackage.Sounds.TryGetValue(pair.SoundEvent, out var sound))
             {
-                soundPackage.Package.Dispose();
+                issues.Add($"Sound object {soundPackage.Name}.{pair.SoundEvent} was not found in {soundPackage.Path}.");
+                continue;
             }
+            if (sound.Key is not { } key)
+            {
+                issues.Add($"Sound object {soundPackage.Name}.{pair.SoundEvent} uses an unsupported serialized key layout.");
+                continue;
+            }
+
+            links.Add(new BridgeLink(
+                pair.SourcePackage,
+                pair.SourceObject,
+                pair.Section,
+                pair.Cue,
+                pair.LocalizationFile,
+                pair.SoundPackage + "." + pair.SoundEvent,
+                key));
         }
 
         links.Sort((left, right) =>
@@ -154,7 +145,7 @@ public static unsafe class Exports
                 ? byCue
                 : string.Compare(left.SoundEvent, right.SoundEvent, StringComparison.OrdinalIgnoreCase);
         });
-        return new BridgeResult(links, issues);
+        return new BridgeResult(links, issues, soundPackages.Values.ToArray());
     }
 
     private static IEnumerable<string> FindScriptPackages(string systemRoot)
@@ -196,43 +187,40 @@ public static unsafe class Exports
         return Path.GetFileNameWithoutExtension(baseName);
     }
 
-    private static bool TryReadSoundMapKey(
-        SoundPackage package,
-        string soundEvent,
-        out uint key,
-        out string issue)
+    /// <summary>Reads every sound in a package, keeping each one's export position.</summary>
+    private static SoundPackage ReadSoundPackage(string path)
     {
-        key = 0;
-        var sound = package.Package.FindObjectByGroup(package.PackageName + "." + soundEvent);
-        if (sound is null || sound.ExportTable is null)
+        var bytes = File.ReadAllBytes(path);
+        using var package = UnrealLoader.LoadPackage(path, FileAccess.Read);
+        package.InitializePackage(UnrealPackage.InitFlags.Construct | UnrealPackage.InitFlags.RegisterClasses);
+
+        var sounds = new Dictionary<string, SoundEntry>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < package.Exports.Count; index++)
         {
-            issue = $"Sound object {package.PackageName}.{soundEvent} was not found in {package.Path}.";
-            return false;
+            var export = package.Exports[index];
+            if (export.Class?.ObjectName.ToString() != "Sound")
+            {
+                continue;
+            }
+
+            var name = export.ObjectName.ToString();
+            uint? key = null;
+            string? lipSyncPath = null;
+            if (export.SerialOffset >= 0
+                && export.SerialSize > 0
+                && export.SerialOffset <= bytes.Length - export.SerialSize
+                && SoundData.TryRead(
+                    bytes.AsSpan(export.SerialOffset, export.SerialSize),
+                    out var storedKey,
+                    out lipSyncPath))
+            {
+                key = storedKey;
+            }
+
+            sounds.TryAdd(name, new SoundEntry(name, index, key, lipSyncPath));
         }
 
-        if (sound.Class is null || sound.Class.Name != "Sound")
-        {
-            issue = $"Object {package.PackageName}.{soundEvent} is not an Engine.Sound export.";
-            return false;
-        }
-
-        var serialOffset = sound.ExportTable.SerialOffset;
-        var serialSize = sound.ExportTable.SerialSize;
-        if (serialOffset < 0 || serialSize < 5 || serialOffset > package.Bytes.Length - 5)
-        {
-            issue = $"Sound object {package.PackageName}.{soundEvent} has an invalid serialized range.";
-            return false;
-        }
-
-        if (package.Bytes[serialOffset] != 0)
-        {
-            issue = $"Sound object {package.PackageName}.{soundEvent} uses an unsupported serialized key layout.";
-            return false;
-        }
-
-        key = BinaryPrimitives.ReadUInt32LittleEndian(package.Bytes.AsSpan(serialOffset + 1, sizeof(uint)));
-        issue = string.Empty;
-        return true;
+        return new SoundPackage(Path.GetFileNameWithoutExtension(path), path, sounds);
     }
 
     private static int WriteResult(byte* outputUtf8, int outputCapacity, BridgeResult result)
@@ -261,6 +249,35 @@ public static unsafe class Exports
             foreach (var issue in result.Issues)
             {
                 writer.WriteStringValue(issue);
+            }
+            writer.WriteEndArray();
+            writer.WritePropertyName("soundPackages");
+            writer.WriteStartArray();
+            foreach (var soundPackage in result.SoundPackages)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("package", soundPackage.Name);
+                writer.WritePropertyName("sounds");
+                writer.WriteStartArray();
+                foreach (var sound in soundPackage.Sounds.Values.OrderBy(sound => sound.ExportIndex))
+                {
+                    if (sound.Key is not { } key)
+                    {
+                        continue;
+                    }
+
+                    writer.WriteStartObject();
+                    writer.WriteString("name", sound.Name);
+                    writer.WriteNumber("exportIndex", sound.ExportIndex);
+                    writer.WriteNumber("soundMapKey", key);
+                    if (sound.LipSyncPath is not null)
+                    {
+                        writer.WriteString("lipSyncPath", sound.LipSyncPath);
+                    }
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+                writer.WriteEndObject();
             }
             writer.WriteEndArray();
             writer.WriteEndObject();
@@ -314,10 +331,12 @@ public static unsafe class Exports
         string SoundEvent,
         uint SoundMapKey);
 
-    private sealed record BridgeResult(IReadOnlyList<BridgeLink> Links, IReadOnlyList<string> Issues);
+    private sealed record BridgeResult(
+        IReadOnlyList<BridgeLink> Links,
+        IReadOnlyList<string> Issues,
+        IReadOnlyList<SoundPackage> SoundPackages);
 
-    private sealed record SoundPackage(UnrealPackage Package, byte[] Bytes, string Path)
-    {
-        public string PackageName => System.IO.Path.GetFileNameWithoutExtension(Path);
-    }
+    private sealed record SoundPackage(string Name, string Path, IReadOnlyDictionary<string, SoundEntry> Sounds);
+
+    private sealed record SoundEntry(string Name, int ExportIndex, uint? Key, string? LipSyncPath);
 }

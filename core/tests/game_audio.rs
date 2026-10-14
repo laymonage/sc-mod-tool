@@ -64,6 +64,23 @@ fn decodes_every_discovered_game_segment() {
                 language.label
             );
         }
+        if language.directory.eq_ignore_ascii_case("ENGLISH") {
+            // These packages store scrambled sound keys; the segments were
+            // confirmed by listening.
+            for (segment_id, cue) in [
+                ("ENGLISH/0_0_2.LS0:449196", "Speech_0012L"),
+                ("ENGLISH/0_0_2.LS0:564212", "Speech_0018L"),
+                ("ENGLISH/2_1_2.LS0:1812880", "Speech_0082L"),
+            ] {
+                assert!(
+                    subtitles
+                        .by_segment
+                        .get(segment_id)
+                        .is_some_and(|found| found.iter().any(|subtitle| subtitle.cue == cue)),
+                    "{segment_id}: expected subtitle {cue}"
+                );
+            }
+        }
         for (segment_id, possible_subtitles) in &subtitles.by_segment {
             assert!(
                 banks

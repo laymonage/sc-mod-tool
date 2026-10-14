@@ -1,5 +1,6 @@
 pub mod decoder;
 mod error;
+mod sound_keys;
 pub mod subtitles;
 
 pub use error::Error;

@@ -510,7 +510,7 @@ impl SCModToolApp {
             .show(ctx, |ui| {
                 ui.label(
                     RichText::new(
-                        "These script references could not be matched to a segment and subtitle.",
+                        "Script references that could not be matched to a segment and subtitle, and sound keys that were corrected.",
                     )
                     .weak(),
                 );

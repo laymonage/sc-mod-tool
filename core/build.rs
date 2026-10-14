@@ -65,7 +65,7 @@ fn build_uelib_bridge(manifest_dir: &Path) {
 
     let project = manifest_dir.join("uelib-bridge/UELibBridge.csproj");
     println!("cargo:rerun-if-changed={}", project.display());
-    for source in ["Exports.cs", "DirectPairs.cs"] {
+    for source in ["Exports.cs", "DirectPairs.cs", "SoundData.cs"] {
         let source = manifest_dir.join("uelib-bridge").join(source);
         println!("cargo:rerun-if-changed={}", source.display());
     }

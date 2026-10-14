@@ -11,6 +11,7 @@ use encoding_rs::WINDOWS_1252;
 use serde::Deserialize;
 
 use crate::Error;
+use crate::sound_keys::{self, KeyCorrections};
 
 const MAP_RECORD_SIZE: usize = 56;
 #[cfg(feature = "uelib-bridge")]
@@ -60,24 +61,30 @@ struct BridgeLink {
 pub struct CompiledLinks {
     links: Vec<BridgeLink>,
     issues: Vec<String>,
+    corrections: KeyCorrections,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BridgeResult {
     // A failed analysis returns only `error`.
     #[serde(default)]
     links: Vec<BridgeLink>,
     #[serde(default)]
     issues: Vec<String>,
+    #[serde(default)]
+    sound_packages: Vec<sound_keys::SoundPackage>,
     #[cfg(feature = "uelib-bridge")]
     error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct MapRecord {
+pub(crate) struct MapRecord {
     offset: u32,
     compressed_bytes: u32,
-    sample_count: u32,
+    pub(crate) sample_count: u32,
+    /// Zero when the record is too short to include it.
+    pub(crate) sample_rate: u32,
 }
 
 /// Matches `language`'s sound banks to subtitle cues.
@@ -115,10 +122,12 @@ pub fn load_verified_subtitles(
         Some(links) => Arc::clone(links),
         None => {
             let result = scan_compiled_links(game_root)?;
+            let corrections = sound_keys::correct(game_root, &sounds, &result.sound_packages);
             compiled_links
                 .insert(Arc::new(CompiledLinks {
                     links: result.links,
                     issues: result.issues,
+                    corrections,
                 }))
                 .clone()
         }
@@ -139,6 +148,9 @@ pub fn load_verified_subtitles(
             ),
         );
     }
+    for note in &bridge.corrections.notes {
+        push_warning(&mut analysis.warnings, note.clone());
+    }
     if bridge.links.is_empty() {
         push_warning(
             &mut analysis.warnings,
@@ -149,7 +161,11 @@ pub fn load_verified_subtitles(
     let localization_root = game_root.join("system").join("LOCALIZATION");
     let mut localization_cache = HashMap::<PathBuf, String>::new();
     for link in &bridge.links {
-        let segment = match resolve_segment(link, &map_records, banks) {
+        let key = bridge
+            .corrections
+            .key(&link.sound_event)
+            .unwrap_or(link.sound_map_key);
+        let segment = match resolve_segment(&link.sound_event, key, &map_records, banks) {
             Ok(segment) => segment,
             Err(warning) => {
                 push_warning(&mut analysis.warnings, warning);
@@ -201,7 +217,7 @@ pub fn load_verified_subtitles(
         if let Some(existing) = subtitles.iter_mut().find(|subtitle| {
             subtitle.cue.eq_ignore_ascii_case(&link.cue)
                 && subtitle.sound_event.eq_ignore_ascii_case(&link.sound_event)
-                && subtitle.sound_map_key == link.sound_map_key
+                && subtitle.sound_map_key == key
         }) {
             if !existing.sources.contains(&source) {
                 existing.sources.push(source);
@@ -212,7 +228,7 @@ pub fn load_verified_subtitles(
                 text,
                 sources: vec![source],
                 sound_event: link.sound_event.clone(),
-                sound_map_key: link.sound_map_key,
+                sound_map_key: key,
                 confidence: MappingConfidence::ExplicitCompiledReference,
             });
         }
@@ -289,7 +305,7 @@ fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
     }
 }
 
-fn parse_map_records(data: &[u8]) -> HashMap<u32, HashSet<MapRecord>> {
+pub(crate) fn parse_map_records(data: &[u8]) -> HashMap<u32, HashSet<MapRecord>> {
     let mut records = HashMap::<u32, HashSet<MapRecord>>::new();
     if data.len() < MAP_RECORD_SIZE {
         return records;
@@ -323,6 +339,7 @@ fn parse_map_records(data: &[u8]) -> HashMap<u32, HashSet<MapRecord>> {
             offset,
             compressed_bytes,
             sample_count,
+            sample_rate: read_u32(data, position + 68).unwrap_or(0),
         });
     }
     records
@@ -334,18 +351,18 @@ fn read_u32(data: &[u8], position: usize) -> Option<u32> {
 }
 
 fn resolve_segment<'a>(
-    link: &BridgeLink,
+    sound_event: &str,
+    key: u32,
     map_records: &HashMap<u32, HashSet<MapRecord>>,
     banks: &'a [super::Bank],
 ) -> Result<&'a super::Segment, String> {
-    let Some(records) = map_records.get(&link.sound_map_key) else {
+    let Some(records) = map_records.get(&key) else {
         return Err(format!(
-            "{} (key 0x{:08X}) has no matching entry in MAPS.LM0.",
-            link.sound_event, link.sound_map_key
+            "{sound_event} (key 0x{key:08X}) has no matching entry in MAPS.LM0."
         ));
     };
 
-    let expected_code = sound_package_bank_code(&link.sound_event);
+    let expected_code = sound_package_bank_code(sound_event);
     let mut matches = Vec::new();
     for record in records {
         for bank in banks.iter().filter(|bank| {
@@ -370,12 +387,10 @@ fn resolve_segment<'a>(
     match matches.as_slice() {
         [segment] => Ok(segment),
         [] => Err(format!(
-            "{} (key 0x{:08X}) did not resolve to a recognized segment in MAPS.LM0.",
-            link.sound_event, link.sound_map_key
+            "{sound_event} (key 0x{key:08X}) did not resolve to a recognized segment in MAPS.LM0."
         )),
         _ => Err(format!(
-            "{} (key 0x{:08X}) resolves to multiple audio segments.",
-            link.sound_event, link.sound_map_key
+            "{sound_event} (key 0x{key:08X}) resolves to multiple audio segments."
         )),
     }
 }
@@ -426,7 +441,7 @@ fn localization_path(
     })
 }
 
-fn find_file(directory: &Path, file_name: &str) -> Result<PathBuf, String> {
+pub(crate) fn find_file(directory: &Path, file_name: &str) -> Result<PathBuf, String> {
     let entries = fs::read_dir(directory)
         .map_err(|error| format!("Could not read directory {}: {error}", directory.display()))?;
     for entry in entries {
@@ -492,7 +507,7 @@ mod tests {
 
     #[test]
     fn parses_map_record_key_offset_size_and_samples() {
-        let mut data = vec![0; MAP_RECORD_SIZE];
+        let mut data = vec![0; 128];
         write_u32(&mut data, 0, 0x0084_0001);
         write_u32(&mut data, 4, 1);
         write_u32(&mut data, 8, 1);
@@ -500,6 +515,7 @@ mod tests {
         write_u32(&mut data, 20, 173_296);
         write_u32(&mut data, 48, 29_967);
         write_u32(&mut data, 52, 15_571);
+        write_u32(&mut data, 68, 36_000);
 
         let records = parse_map_records(&data);
         assert_eq!(
@@ -508,6 +524,7 @@ mod tests {
                 offset: 173_296,
                 compressed_bytes: 15_571,
                 sample_count: 29_967,
+                sample_rate: 36_000,
             }]))
         );
     }
@@ -554,6 +571,28 @@ mod tests {
         let duplicate = "[Pilot]\nSpeech_0001L=First\nSpeech_0001L=Second\n";
         assert!(find_cue(duplicate, "Pilot", "Speech_0001L").is_err());
         assert!(find_cue("[Pilot]\n", "Pilot", "Speech_0001L").is_err());
+    }
+
+    #[test]
+    fn reads_the_sound_packages_reported_by_the_bridge() {
+        let result: BridgeResult = serde_json::from_str(
+            r#"{
+                "links": [],
+                "issues": [],
+                "soundPackages": [{
+                    "package": "S0_0_2Voice",
+                    "sounds": [{
+                        "name": "Play_00_15_01",
+                        "exportIndex": 40,
+                        "soundMapKey": 3932201,
+                        "lipSyncPath": "\\S0_0_2Voice\\00_15_01.bin"
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.sound_packages.len(), 1);
     }
 
     #[test]
