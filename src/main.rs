@@ -484,6 +484,7 @@ impl ScModToolApp {
         let mut selected_bank = None;
         egui::ScrollArea::vertical()
             .id_salt("bank-list-scroll")
+            .auto_shrink([true, false])
             .show(ui, |ui| {
                 for (index, bank) in self.banks.iter().enumerate() {
                     let label = if bank.segments.is_empty() {
@@ -535,30 +536,59 @@ impl ScModToolApp {
             return;
         }
 
+        const PLAY_COLUMN_WIDTH: f32 = 52.0;
+        const DURATION_COLUMN_WIDTH: f32 = 68.0;
+        const FORMAT_COLUMN_WIDTH: f32 = 112.0;
+        const SIZE_COLUMN_WIDTH: f32 = 88.0;
+        const OFFSET_COLUMN_WIDTH: f32 = 130.0;
+
         let mut play_segment = None;
+        let body_height = ui.text_style_height(&egui::TextStyle::Body);
+        let monospace_height = ui.text_style_height(&egui::TextStyle::Monospace);
+        let button_height = ui.spacing().interact_size.y;
+        let stripe_color = ui.visuals().faint_bg_color;
+
         egui::ScrollArea::both()
             .id_salt("segment-list-scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                egui::Grid::new("segment-grid")
-                    .striped(true)
-                    .show(ui, |ui| {
-                        for segment in segments {
-                            let clicked = ui
-                                .push_id(&segment.id, |ui| ui.button("Play").clicked())
-                                .inner;
-                            if clicked {
+                for (index, segment) in segments.iter().enumerate() {
+                    let mut show_row = |ui: &mut egui::Ui| {
+                        ui.horizontal_top(|ui| {
+                            if ui
+                                .add_sized(
+                                    egui::vec2(PLAY_COLUMN_WIDTH, button_height),
+                                    egui::Button::new("Play"),
+                                )
+                                .clicked()
+                            {
                                 play_segment = Some(segment.clone());
                             }
-                            ui.label(format!(
-                                "{:.2} s",
-                                segment.sample_count as f64 / segment.sample_rate as f64
-                            ));
-                            ui.label(format!(
-                                "{} Hz · {} ch",
-                                segment.sample_rate, segment.channels
-                            ));
-                            ui.label(format!("{} bytes", segment.byte_length));
-                            ui.monospace(format!("offset {}", segment.offset));
+                            ui.add_sized(
+                                egui::vec2(DURATION_COLUMN_WIDTH, body_height),
+                                egui::Label::new(format!(
+                                    "{:.2} s",
+                                    segment.sample_count as f64 / segment.sample_rate as f64
+                                )),
+                            );
+                            ui.add_sized(
+                                egui::vec2(FORMAT_COLUMN_WIDTH, body_height),
+                                egui::Label::new(format!(
+                                    "{} Hz · {} ch",
+                                    segment.sample_rate, segment.channels
+                                )),
+                            );
+                            ui.add_sized(
+                                egui::vec2(SIZE_COLUMN_WIDTH, body_height),
+                                egui::Label::new(format!("{} bytes", segment.byte_length)),
+                            );
+                            ui.add_sized(
+                                egui::vec2(OFFSET_COLUMN_WIDTH, monospace_height),
+                                egui::Label::new(
+                                    egui::RichText::new(format!("offset {}", segment.offset))
+                                        .monospace(),
+                                ),
+                            );
                             if let Some(subtitles) = self.subtitles.get(&segment.id) {
                                 let text = subtitles
                                     .iter()
@@ -578,13 +608,22 @@ impl ScModToolApp {
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n\n");
-                                ui.label(text).on_hover_text(provenance);
+                                ui.add(egui::Label::new(text).wrap())
+                                    .on_hover_text(provenance);
                             } else {
                                 ui.label("");
                             }
-                            ui.end_row();
-                        }
-                    });
+                            ui.add_space(ui.available_width().max(0.0));
+                        });
+                    };
+                    if index % 2 == 1 {
+                        egui::Frame::new()
+                            .fill(stripe_color)
+                            .show(ui, |ui| show_row(ui));
+                    } else {
+                        show_row(ui);
+                    }
+                }
             });
         if let Some(segment) = play_segment {
             self.play_segment(ctx, bank_path, segment);
@@ -606,12 +645,7 @@ impl eframe::App for ScModToolApp {
         }
 
         self.show_toolbar(ctx);
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| self.show_banks(ui));
-                ui.separator();
-                ui.vertical(|ui| self.show_segments(ui, ctx));
-            });
+        egui::TopBottomPanel::bottom("status-bar").show(ctx, |ui| {
             ui.separator();
             if let Some(progress) = &self.scan_progress {
                 let fraction = if progress.total == 0 {
@@ -637,6 +671,28 @@ impl eframe::App for ScModToolApp {
             }
             ui.small(
                 "Read-only browser. Only recognized mono 4-bit Ubisoft ADPCM streams are playable.",
+            );
+        });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let content_size = ui.available_size();
+            ui.allocate_ui_with_layout(
+                content_size,
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| {
+                    let content_height = ui.available_height();
+                    let banks_width = (ui.available_width() * 0.25).clamp(180.0, 280.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(banks_width, content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| self.show_banks(ui),
+                    );
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), content_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| self.show_segments(ui, ctx),
+                    );
+                },
             );
         });
 
