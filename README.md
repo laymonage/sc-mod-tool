@@ -36,6 +36,9 @@ cargo test
 cargo run
 ```
 
+To open a game folder straight away, pass it as an argument:
+`cargo run -- "C:\Games\Splinter Cell"`.
+
 The vgmstream source is pinned as a Git submodule under `vendor/vgmstream`.
 The core crate compiles only the upstream Ubisoft ADPCM decoder and the small
 SC1 segment adapter. Include vgmstream's license and copyright notices when
