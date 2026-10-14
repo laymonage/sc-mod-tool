@@ -59,14 +59,12 @@ fn build_uelib_bridge(manifest_dir: &Path) -> bool {
         }
         _ => return false,
     };
-    if platform == Platform::Linux && host != target {
+    // Native AOT can cross-compile between architectures, but not between
+    // operating systems.
+    if !platform.is_host(&host) {
+        let name = platform.name();
         panic!(
-            "Build the Linux UELib Native AOT bridge on Linux (for example, from WSL), not via cross-compilation from {host}."
-        );
-    }
-    if platform == Platform::MacOS && !host.contains("apple") {
-        panic!(
-            "Build the macOS UELib Native AOT bridge on macOS, not via cross-compilation from {host}."
+            "Build the {name} UELib Native AOT bridge on {name}, not via cross-compilation from {host}."
         );
     }
 
@@ -149,11 +147,29 @@ fn build_uelib_bridge(manifest_dir: &Path) -> bool {
     true
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum Platform {
     Windows,
     Linux,
     MacOS,
+}
+
+impl Platform {
+    fn name(self) -> &'static str {
+        match self {
+            Platform::Windows => "Windows",
+            Platform::Linux => "Linux",
+            Platform::MacOS => "macOS",
+        }
+    }
+
+    fn is_host(self, host: &str) -> bool {
+        match self {
+            Platform::Windows => host.contains("windows"),
+            Platform::Linux => host.contains("linux"),
+            Platform::MacOS => host.contains("apple"),
+        }
+    }
 }
 
 /// Copies the published library to a `lib`-prefixed name the linker can
