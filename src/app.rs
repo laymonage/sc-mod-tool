@@ -53,6 +53,32 @@ struct PendingPlayback {
     cancel: Arc<AtomicBool>,
 }
 
+/// Which segments the segment table shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextFilter {
+    All,
+    /// Segments with a subtitle that has text.
+    WithText,
+    /// Segments matched only to lines without text, or to no line at all.
+    WithoutText,
+}
+
+impl TextFilter {
+    const ALL: [TextFilter; 3] = [
+        TextFilter::All,
+        TextFilter::WithText,
+        TextFilter::WithoutText,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            TextFilter::All => "All segments",
+            TextFilter::WithText => "With text",
+            TextFilter::WithoutText => "Without text",
+        }
+    }
+}
+
 struct Status {
     message: String,
     is_error: bool,
@@ -89,7 +115,7 @@ pub struct SCModToolApp {
 
     bank_filter: String,
     segment_filter: String,
-    only_with_subtitles: bool,
+    text_filter: TextFilter,
     show_warnings: bool,
     /// Scroll the segment table to the selection on the next frame.
     scroll_to_selection: bool,
@@ -126,7 +152,7 @@ impl SCModToolApp {
             },
             bank_filter: String::new(),
             segment_filter: String::new(),
-            only_with_subtitles: false,
+            text_filter: TextFilter::All,
             show_warnings: false,
             scroll_to_selection: false,
         }
@@ -460,14 +486,21 @@ impl SCModToolApp {
         self.select_first_segment();
 
         let segment_count: usize = self.banks.iter().map(|bank| bank.segments.len()).sum();
-        let subtitled_count = self.subtitles.len();
+        let with_text = self
+            .subtitles
+            .values()
+            .filter(|subtitles| subtitles.iter().any(Subtitle::has_text))
+            .count();
+        let with_empty_lines = self.subtitles.len() - with_text;
         match subtitle_error {
             Some(error) => self.set_status(
                 format!("Found {segment_count} segments. Subtitles are unavailable: {error}"),
                 true,
             ),
             None => self.set_status(
-                format!("Found {segment_count} segments, {subtitled_count} with subtitles."),
+                format!(
+                    "Found {segment_count} segments: {with_text} with subtitles, {with_empty_lines} with lines that have no text."
+                ),
                 false,
             ),
         }

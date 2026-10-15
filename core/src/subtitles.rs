@@ -31,12 +31,20 @@ pub enum MappingConfidence {
 #[derive(Clone, Debug)]
 pub struct Subtitle {
     pub cue: String,
-    pub text: String,
+    /// The line's text, or `None` when the localization file has no text for
+    /// it: the line exists in its scene, but reads `(null)` or is empty.
+    pub text: Option<String>,
     /// The compiled script objects that reference this cue and sound.
     pub sources: Vec<String>,
     pub sound_event: String,
     pub sound_map_key: u32,
     pub confidence: MappingConfidence,
+}
+
+impl Subtitle {
+    pub fn has_text(&self) -> bool {
+        self.text.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -47,6 +55,21 @@ pub struct SubtitleAnalysis {
     pub mapped_pairs: usize,
     /// Sounds matched to text the game doesn't show, by section order.
     pub unshown_pairs: usize,
+}
+
+impl SubtitleAnalysis {
+    /// Segments with at least one subtitle that has text.
+    pub fn segments_with_text(&self) -> usize {
+        self.by_segment
+            .values()
+            .filter(|subtitles| subtitles.iter().any(Subtitle::has_text))
+            .count()
+    }
+
+    /// Segments matched only to lines without text.
+    pub fn segments_with_empty_lines(&self) -> usize {
+        self.by_segment.len() - self.segments_with_text()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,7 +310,7 @@ pub fn load_verified_subtitles(
             &segment.id,
             Subtitle {
                 cue: link.cue.clone(),
-                text,
+                text: line_text(&text),
                 sources: vec![format!("{}: {}", link.source_package, link.source_object)],
                 sound_event: link.sound_event.clone(),
                 sound_map_key: key,
@@ -321,10 +344,14 @@ pub fn load_verified_subtitles(
     }
 
     for subtitles in analysis.by_segment.values_mut() {
-        // Subtitles the game shows come first.
+        // Subtitles with text come first, then those the game shows.
         subtitles.sort_by(|left, right| {
-            (left.confidence != MappingConfidence::ExplicitCompiledReference)
-                .cmp(&(right.confidence != MappingConfidence::ExplicitCompiledReference))
+            (!left.has_text())
+                .cmp(&!right.has_text())
+                .then_with(|| {
+                    (left.confidence != MappingConfidence::ExplicitCompiledReference)
+                        .cmp(&(right.confidence != MappingConfidence::ExplicitCompiledReference))
+                })
                 .then_with(|| {
                     left.cue
                         .to_ascii_lowercase()
@@ -416,7 +443,7 @@ fn match_unshown_subtitles(
         let Some((cue, text)) = line else {
             continue;
         };
-        if call.cue.is_some() || text.is_empty() {
+        if call.cue.is_some() {
             continue;
         }
         let Some(key) = key_of(call) else {
@@ -434,7 +461,7 @@ fn match_unshown_subtitles(
             &segment.id,
             Subtitle {
                 cue: cue.clone(),
-                text: text.clone(),
+                text: line_text(text),
                 sources: vec![format!(
                     "{}: {}",
                     pattern.source_package, call.source_object
@@ -502,6 +529,13 @@ fn align(
         calls.len(),
         lines.len()
     ))
+}
+
+/// A localization line's text, or `None` for a line without text: the game's
+/// files use `(null)` for those.
+fn line_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty() && !text.eq_ignore_ascii_case("(null)")).then(|| text.to_owned())
 }
 
 /// Finds the line of `lines` with the same cue as `reference_lines[index]`.
@@ -1243,13 +1277,55 @@ mod tests {
 
         assert_eq!(analysis.unshown_pairs, 2);
         assert_eq!(
-            analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0].text,
-            "Verdammt."
+            analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0]
+                .text
+                .as_deref(),
+            Some("Verdammt.")
         );
         assert_eq!(
-            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0].text,
-            "Haltet ihn auf."
+            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0]
+                .text
+                .as_deref(),
+            Some("Haltet ihn auf.")
         );
+    }
+
+    #[test]
+    fn keeps_lines_without_text_matched_to_their_audio() {
+        let banks = test_bank(&[0, 100]);
+        let records = test_records(&[(1, 0), (2, 100)]);
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_B", 2, None),
+            ],
+        };
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0001L=(null)\nSpeech_0002L=Hello.\n",
+            &mut sections,
+        );
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            &pattern,
+            &sections,
+            &sections,
+            &KeyCorrections::default(),
+            &records,
+            &banks,
+        );
+
+        let empty = &analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0];
+        assert_eq!(
+            (empty.cue.as_str(), empty.text.as_deref()),
+            ("Speech_0001L", None)
+        );
+        assert_eq!(analysis.segments_with_text(), 1);
+        assert_eq!(analysis.segments_with_empty_lines(), 1);
     }
 
     #[test]
@@ -1305,8 +1381,10 @@ mod tests {
 
         assert_eq!(analysis.unshown_pairs, 2);
         assert_eq!(
-            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0].text,
-            "We're being attacked."
+            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0]
+                .text
+                .as_deref(),
+            Some("We're being attacked.")
         );
     }
 
@@ -1362,13 +1440,15 @@ mod tests {
         assert_eq!(analysis.unshown_pairs, 2);
         let first = &analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0];
         assert_eq!(
-            (first.cue.as_str(), first.text.as_str()),
-            ("Speech_0009L", "Hello.")
+            (first.cue.as_str(), first.text.as_deref()),
+            ("Speech_0009L", Some("Hello."))
         );
         assert_eq!(first.confidence, MappingConfidence::SectionOrder);
         assert_eq!(
-            analysis.by_segment["ENGLISH/1_1_2.LS0:200"][0].text,
-            "Goodbye."
+            analysis.by_segment["ENGLISH/1_1_2.LS0:200"][0]
+                .text
+                .as_deref(),
+            Some("Goodbye.")
         );
         // The sound passed with its cue is matched explicitly elsewhere.
         assert!(!analysis.by_segment.contains_key("ENGLISH/1_1_2.LS0:100"));
@@ -1405,8 +1485,10 @@ mod tests {
 
         assert_eq!(analysis.unshown_pairs, 2);
         assert_eq!(
-            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0].text,
-            "28469."
+            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0]
+                .text
+                .as_deref(),
+            Some("28469.")
         );
     }
 

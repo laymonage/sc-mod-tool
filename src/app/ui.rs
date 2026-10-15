@@ -6,8 +6,11 @@ use sc_mod_tool_core::{
 };
 
 const NOT_SHOWN_IN_GAME: &str = "Not shown in game";
+const NO_TEXT: &str = "No text";
+const NO_TEXT_HINT: &str =
+    "This line exists in its scene, but the game's localization files have no text for it.";
 
-use super::SCModToolApp;
+use super::{SCModToolApp, TextFilter};
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
 enum Action {
@@ -318,7 +321,13 @@ impl SCModToolApp {
                     .hint_text("🔍 Search subtitles and cues")
                     .desired_width(260.0),
             );
-            ui.checkbox(&mut self.only_with_subtitles, "With subtitles only");
+            egui::ComboBox::from_id_salt("text-filter")
+                .selected_text(self.text_filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in TextFilter::ALL {
+                        ui.selectable_value(&mut self.text_filter, filter, filter.label());
+                    }
+                });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!("{} of {}", visible.len(), bank.segments.len())).weak(),
@@ -394,11 +403,24 @@ impl SCModToolApp {
                     });
                     row.col(|ui| match self.subtitles.get(&segment.id) {
                         Some(subtitles) => {
-                            let mut text = subtitles[0].text.clone();
+                            // Subtitles with text are sorted first, so if
+                            // the first has none, none of them do.
+                            let Some(mut text) = subtitles[0].text.clone() else {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!("{NO_TEXT} · {}", subtitles[0].cue))
+                                            .italics()
+                                            .weak(),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(NO_TEXT_HINT);
+                                return;
+                            };
                             if subtitles.len() > 1 {
                                 text.push_str(&format!("  (+{} more)", subtitles.len() - 1));
                             }
-                            // Subtitles the game shows are sorted first, so
+                            // Subtitles the game shows are sorted next, so
                             // this means none of them are shown.
                             if is_shown_in_game(&subtitles[0]) {
                                 ui.add(egui::Label::new(text).truncate());
@@ -549,16 +571,24 @@ impl SCModToolApp {
             .enumerate()
             .filter(|(_, segment)| {
                 let subtitles = self.subtitles.get(&segment.id);
-                if self.only_with_subtitles && subtitles.is_none() {
-                    return false;
-                }
-                query.is_empty()
-                    || subtitles.is_some_and(|subtitles| {
-                        subtitles.iter().any(|subtitle| {
-                            subtitle.text.to_lowercase().contains(&query)
-                                || subtitle.cue.to_lowercase().contains(&query)
-                        })
-                    })
+                let has_text =
+                    subtitles.is_some_and(|subtitles| subtitles.iter().any(Subtitle::has_text));
+                let shown = match self.text_filter {
+                    TextFilter::All => true,
+                    TextFilter::WithText => has_text,
+                    TextFilter::WithoutText => !has_text,
+                };
+                shown
+                    && (query.is_empty()
+                        || subtitles.is_some_and(|subtitles| {
+                            subtitles.iter().any(|subtitle| {
+                                subtitle
+                                    .text
+                                    .as_deref()
+                                    .is_some_and(|text| text.to_lowercase().contains(&query))
+                                    || subtitle.cue.to_lowercase().contains(&query)
+                            })
+                        }))
             })
             .map(|(index, _)| index)
             .collect()
@@ -637,14 +667,19 @@ fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         // Read-only for now; editing subtitles will make this editable.
-        let mut text = subtitle.text.as_str();
+        let mut text = subtitle.text.as_deref().unwrap_or_default();
         ui.add(
             egui::TextEdit::multiline(&mut text)
+                .hint_text("No text yet")
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
         );
         ui.horizontal(|ui| {
             ui.label(RichText::new(&subtitle.cue).small().weak());
+            if !subtitle.has_text() {
+                ui.label(RichText::new(NO_TEXT).small().italics().weak())
+                    .on_hover_text(NO_TEXT_HINT);
+            }
             if !is_shown_in_game(subtitle) {
                 ui.label(RichText::new(NOT_SHOWN_IN_GAME).small().italics().weak())
                     .on_hover_text("The game plays this line without a subtitle. Its text is the line at the same position in the scene's localization section.");

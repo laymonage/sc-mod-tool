@@ -72,10 +72,12 @@ fn decodes_every_discovered_game_segment() {
                 subtitles
                     .by_segment
                     .get(segment_id)
-                    .is_some_and(|found| found
-                        .iter()
-                        .any(|subtitle| subtitle.cue == "Speech_0016L"
-                            && subtitle.text.contains("Dein Freund?"))),
+                    .is_some_and(|found| found.iter().any(|subtitle| subtitle.cue
+                        == "Speech_0016L"
+                        && subtitle
+                            .text
+                            .as_deref()
+                            .is_some_and(|text| text.contains("Dein Freund?")))),
                 "{segment_id}: expected German subtitle Speech_0016L"
             );
         }
@@ -162,7 +164,13 @@ fn decodes_every_discovered_game_segment() {
                 segment_id
             );
             for subtitle in possible_subtitles {
-                assert!(!subtitle.text.trim().is_empty(), "{segment_id}: empty cue");
+                if let Some(text) = &subtitle.text {
+                    assert!(!text.trim().is_empty(), "{segment_id}: empty cue");
+                    assert!(
+                        !text.eq_ignore_ascii_case("(null)"),
+                        "{segment_id}: placeholder shown as text"
+                    );
+                }
             }
         }
         let mut language_banks = 0;
@@ -213,12 +221,13 @@ fn decodes_every_discovered_game_segment() {
         }
 
         println!(
-            "{}: decoded {language_segments} segments from {language_banks} banks; mapped {}/{} explicit subtitle/audio references and {} unshown subtitles across {} segments with {} warnings",
+            "{}: decoded {language_segments} segments from {language_banks} banks; mapped {}/{} explicit subtitle/audio references and {} unshown subtitles; {} segments with text and {} with lines that have no text; {} warnings",
             language.label,
             subtitles.mapped_pairs,
             subtitles.explicit_pairs,
             subtitles.unshown_pairs,
-            subtitles.by_segment.len(),
+            subtitles.segments_with_text(),
+            subtitles.segments_with_empty_lines(),
             subtitles.warnings.len()
         );
         for warning in subtitles.warnings.iter().take(8) {
