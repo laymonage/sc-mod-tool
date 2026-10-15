@@ -179,9 +179,11 @@ pub fn load_verified_subtitles(
     if language == "." {
         return Ok(SubtitleAnalysis::default());
     }
-    let extension = localization_extension(language).ok_or_else(|| {
-        format!("Subtitle localization extension is not known for language {language}.")
-    })?;
+    let extension = super::known_language(language)
+        .ok_or_else(|| {
+            format!("Subtitle localization extension is not known for language {language}.")
+        })?
+        .localization_extension;
 
     let sounds = super::find_sounds_directory(root)?;
     let game_root = sounds.parent().ok_or_else(|| {
@@ -914,17 +916,6 @@ fn sound_package_bank_code(sound_event: &str) -> Option<String> {
         return None;
     }
     Some(code.to_owned())
-}
-
-fn localization_extension(language: &str) -> Option<&'static str> {
-    match language.to_ascii_uppercase().as_str() {
-        "ENGLISH" => Some("int"),
-        "FRENCH" => Some("fra"),
-        "GERMAN" => Some("deu"),
-        "ITALIAN" => Some("ita"),
-        "SPANISH" => Some("esp"),
-        _ => None,
-    }
 }
 
 fn localization_path(

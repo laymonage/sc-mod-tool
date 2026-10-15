@@ -60,12 +60,17 @@ pub fn discover_languages(root: &Path) -> Result<Vec<Language>, Error> {
             continue;
         }
 
+        // Extra maps keep their own sounds in folders beside the languages,
+        // such as `1_6_1_1kolacell`, so only known language names count.
         let directory = entry.file_name().to_string_lossy().into_owned();
+        let Some(known) = known_language(&directory) else {
+            continue;
+        };
         let mut banks = Vec::new();
         collect_banks(&entry.path(), Path::new(""), &mut banks)?;
         if !banks.is_empty() {
             languages.push(Language {
-                label: language_label(&directory),
+                label: known.label.to_owned(),
                 directory,
             });
         }
@@ -332,15 +337,27 @@ fn collect_banks(
     Ok(())
 }
 
-fn language_label(directory: &str) -> String {
-    match directory.to_ascii_uppercase().as_str() {
-        "ENGLISH" => "English".to_owned(),
-        "FRENCH" => "French".to_owned(),
-        "GERMAN" => "German".to_owned(),
-        "ITALIAN" => "Italian".to_owned(),
-        "SPANISH" => "Spanish".to_owned(),
-        _ => directory.to_owned(),
-    }
+struct KnownLanguage {
+    label: &'static str,
+    /// The extension of the game's localization files, such as `Echelon.int`.
+    localization_extension: &'static str,
+}
+
+/// Looks up a language by its folder under `Sounds`, ignoring case.
+fn known_language(directory: &str) -> Option<KnownLanguage> {
+    let (label, localization_extension) = match directory.to_ascii_uppercase().as_str() {
+        "ENGLISH" => ("English", "int"),
+        "FRENCH" => ("French", "fra"),
+        "GERMAN" => ("German", "deu"),
+        // The game names this folder in French.
+        "ITALIEN" | "ITALIAN" => ("Italian", "ita"),
+        "SPANISH" => ("Spanish", "esp"),
+        _ => return None,
+    };
+    Some(KnownLanguage {
+        label,
+        localization_extension,
+    })
 }
 
 fn mission_code(file_name: &str) -> Option<String> {
@@ -686,6 +703,26 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("unsupported layout")
+        );
+    }
+
+    #[test]
+    fn skips_extra_map_folders_when_discovering_languages() {
+        let game = tempfile::tempdir().unwrap();
+        let italian = game.path().join("Sounds/ITALIEN");
+        let extra_map = game.path().join("Sounds/1_6_1_1kolacell/English");
+        fs::create_dir_all(&italian).unwrap();
+        fs::create_dir_all(&extra_map).unwrap();
+        fs::write(italian.join("1_1_0.LS0"), make_segment()).unwrap();
+        fs::write(extra_map.join("3_4_2.LS0"), make_segment()).unwrap();
+
+        let languages = discover_languages(game.path()).unwrap();
+        assert_eq!(
+            languages
+                .iter()
+                .map(|language| (language.directory.as_str(), language.label.as_str()))
+                .collect::<Vec<_>>(),
+            [("ITALIEN", "Italian")]
         );
     }
 
