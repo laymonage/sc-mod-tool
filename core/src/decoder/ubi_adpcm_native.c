@@ -48,7 +48,7 @@ int decode_sc1_ubi_adpcm(
         get_u32le(input) != 0x08
         || get_u32le(input + 0x04) != output_samples
         || get_u32le(input + 0x10) == 0
-        || get_u32le(input + 0x24) != 4
+        || (get_u32le(input + 0x24) != 4 && get_u32le(input + 0x24) != 6)
         || get_u32le(input + 0x2c) != 1
     ) {
         return -1;

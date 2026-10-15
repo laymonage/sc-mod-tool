@@ -34,7 +34,8 @@ lip-sync data.
 Result for English: 1085 of 1089 segments are matched to a line. 899 of them
 have text; 186 are matched only to lines whose text is a `(null)` placeholder,
 which the app shows as "No text". The remaining 4 segments have no line at all
-(see [What's left](#whats-left)).
+(see [What's left](#whats-left)). These numbers are for the language's own
+folder; the [extra maps](#extra-maps-soundsmaplanguage) add more.
 
 ## The files
 
@@ -48,6 +49,41 @@ padding, because `MAPS.LM0` records the unpadded size.
 
 A level's lines are usually stored together, in roughly the order they're
 spoken, which is a useful clue when checking a match by hand.
+
+### Extra maps: `Sounds/<map>/<language>/`
+
+Three extra levels keep their own sounds in folders beside the languages:
+`1_6_1_1kolacell`, `1_7_1_1VselkaInfiltration` and `1_7_1_2Vselka`. Each has a
+folder per language it ships (`English`, `French`, `Italien`; no German or
+Spanish), with its own banks and `MAPS.LM0`. Their banks differ from the
+language folder's in two ways:
+
+- **6-bit codes.** Their streams use 6 bits per code instead of 4. The layout is
+  otherwise the same, and vgmstream decodes both.
+- **Reused names.** Both Vselka folders have a `3_1_1.LS0`, with different
+  audio. A map's records only describe its own banks, so each folder's banks
+  are matched against its own `MAPS.LM0`
+  ([`resolve_segments`](../core/src/subtitles.rs)). A sound found in several
+  maps gets its subtitle on each copy.
+
+The app lists these banks under the language, grouped by map. They hold the
+only copies of mission 3 audio (`S3_*` packages) in this release.
+
+**Another version of `S3_1_1Voice`.** The Vselka maps were made with a
+different version of `S3_1_1Voice` than the game ships. The game's
+`S3_1_1Voice.uax` has sounds `0x450000`–`0x450070`, but
+`1_7_1_1VselkaInfiltration`'s map files 60 sounds under the package's ID, 54 of
+them numbered past the end of that range. The keys that do overlap point at
+other lines: the map's `0x45006F` clip is 0.69 s, but the lip-sync file for
+`Play_31_38_02`, which the game's package gives that key, is 1.74 s. Matching
+those keys put Lambert's "GPS shows you're within a stone's throw…" on a 3-second
+clip.
+
+So when most of a map's records under a package's ID are for sounds the package
+doesn't have, that package isn't matched in that map, with a warning
+(`mark_foreign_packages`). This only affects `S3_1_1Voice` in the two Vselka
+maps, and `Lambert`, which doesn't match in any map. Every other match in the
+extra maps that has a lip-sync file agrees with it.
 
 ### The map: `Sounds/<language>/MAPS.LM0`
 
@@ -152,9 +188,11 @@ switching languages.
 For each `Localize` + `Sound` pair: correct the sound's key if needed, look the
 key up in `MAPS.LM0`, find the segment in the named bank with the same offset,
 size and sample count, and read the cue's text from the language's localization
-file. 381 of the 657 pairs match a segment in English. Almost all of the rest
-are mission 3 lines (`S3_*` packages), whose banks this release doesn't
-include.
+file. 390 of the 657 pairs match a segment in English: 381 in the language
+folder and 9 in the extra maps. Almost all of the rest are mission 3 lines
+(`S3_*` packages). The extra maps only ship the mission 3 sounds their own
+levels use, and the Vselka maps' `S3_1_1Voice` sounds can't be matched (see
+[Extra maps](#extra-maps-soundsmaplanguage)).
 
 ### Subtitles not shown in game
 
@@ -248,6 +286,11 @@ segments", "With text", "Without text") and status bar distinguish:
 
 The lines without text are still useful: each one is a known line in a known
 scene, with its cue name and audio, ready for text to be written later.
+
+The extra maps add 134 English segments: 10 with text, 47 with lines without
+text, and 77 with no line. Most of the 77 are the Vselka maps' `S3_1_1Voice`
+sounds, which use another version of the package's keys. German has no extra
+map folders.
 
 The 4 segments with no line in any localization file:
 

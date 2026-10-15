@@ -39,6 +39,45 @@ pub(crate) struct PackageSound {
     lip_sync_path: Option<String>,
 }
 
+/// The keys a package's sounds use, after corrections, by package ID (the
+/// top 16 bits of a key).
+#[derive(Debug)]
+pub(crate) struct PackageKeys {
+    pub(crate) package: String,
+    pub(crate) id: u32,
+    pub(crate) keys: HashSet<u32>,
+}
+
+/// Lists the keys each package's sounds use, after `corrections`.
+pub(crate) fn package_keys(
+    packages: &[SoundPackage],
+    corrections: &KeyCorrections,
+) -> Vec<PackageKeys> {
+    let mut by_id = Vec::<PackageKeys>::new();
+    for package in packages {
+        for sound in &package.sounds {
+            let key = corrections
+                .key(&format!("{}.{}", package.package, sound.name))
+                .unwrap_or(sound.sound_map_key);
+            let id = key >> 16;
+            match by_id
+                .iter_mut()
+                .find(|keys| keys.id == id && keys.package == package.package)
+            {
+                Some(keys) => {
+                    keys.keys.insert(key);
+                }
+                None => by_id.push(PackageKeys {
+                    package: package.package.clone(),
+                    id,
+                    keys: HashSet::from([key]),
+                }),
+            }
+        }
+    }
+    by_id
+}
+
 /// Corrected keys, by lowercased `Package.Sound` name.
 #[derive(Debug, Default)]
 pub(crate) struct KeyCorrections {
@@ -69,14 +108,21 @@ pub(crate) fn correct(
     else {
         return corrections;
     };
-    let Some(durations) = find_file(sounds, "ENGLISH")
-        .and_then(|english| find_file(&english, "MAPS.LM0"))
+    let Some(mut durations) = find_file(sounds, "ENGLISH")
         .ok()
-        .and_then(|path| fs::read(path).ok())
-        .map(|data| clip_durations(&data))
+        .and_then(|english| map_clip_durations(&english))
     else {
         return corrections;
     };
+    // Extra maps have the only copies of some packages' audio, such as
+    // mission 3's.
+    for folder in crate::map_language_folders(sounds, "ENGLISH").unwrap_or_default() {
+        for (key, seconds) in
+            map_clip_durations(&sounds.join(&folder.relative_path)).unwrap_or_default()
+        {
+            durations.entry(key).or_insert(seconds);
+        }
+    }
 
     for package in packages {
         let candidates = package
@@ -110,6 +156,12 @@ pub(crate) fn correct(
         );
     }
     corrections
+}
+
+/// Reads the clip durations from the `MAPS.LM0` in `folder`.
+fn map_clip_durations(folder: &Path) -> Option<HashMap<u32, f64>> {
+    let map_path = find_file(folder, "MAPS.LM0").ok()?;
+    Some(clip_durations(&fs::read(map_path).ok()?))
 }
 
 fn clip_durations(map_data: &[u8]) -> HashMap<u32, f64> {

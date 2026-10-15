@@ -262,11 +262,25 @@ impl SCModToolApp {
                     .show(ui, |ui| {
                         ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
                             let mut shown = 0;
+                            let mut shown_map = None;
                             for (index, bank) in self.banks.iter().enumerate() {
-                                if !bank.name.to_ascii_lowercase().contains(&filter) {
+                                if !bank.name.to_ascii_lowercase().contains(&filter)
+                                    && !bank.map.as_ref().is_some_and(|map| {
+                                        map.to_ascii_lowercase().contains(&filter)
+                                    })
+                                {
                                     continue;
                                 }
                                 shown += 1;
+                                // Extra maps' banks come after the language's
+                                // own, under the map's name.
+                                if let Some(map) = &bank.map
+                                    && shown_map != Some(map)
+                                {
+                                    ui.add_space(6.0);
+                                    ui.label(RichText::new(map).small().weak());
+                                    shown_map = Some(map);
+                                }
                                 if bank_row(ui, bank, self.selected_bank == Some(index)).clicked() {
                                     actions.push(Action::SelectBank(index));
                                 }
@@ -291,9 +305,14 @@ impl SCModToolApp {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(&bank.name).heading());
+            let map = bank
+                .map
+                .as_ref()
+                .map(|map| format!("{map} · "))
+                .unwrap_or_default();
             ui.label(
                 RichText::new(format!(
-                    "{} segments · {}",
+                    "{map}{} segments · {}",
                     bank.segments.len(),
                     format_bytes(bank.size)
                 ))
@@ -467,7 +486,7 @@ impl SCModToolApp {
                     .show(ui, |ui| {
                         ui.add_space(6.0);
                         ui.label(RichText::new(format!("Segment {}", index + 1)).heading());
-                        ui.label(RichText::new(&bank.name).weak());
+                        ui.label(RichText::new(bank_title(bank)).weak());
                         ui.add_space(8.0);
 
                         // Segment actions. Export and replace will go here.
@@ -714,7 +733,16 @@ fn detail_row(ui: &mut egui::Ui, name: &str, value: String) {
 }
 
 fn segment_label(bank: &Bank, segment: &Segment) -> String {
-    format!("{} #{}", bank.name, segment.segment + 1)
+    format!("{} #{}", bank_title(bank), segment.segment + 1)
+}
+
+/// The bank's name, after its extra map's when it has one, since maps reuse
+/// bank names.
+fn bank_title(bank: &Bank) -> String {
+    match &bank.map {
+        Some(map) => format!("{map} / {}", bank.name),
+        None => bank.name.clone(),
+    }
 }
 
 fn format_duration(segment: &Segment) -> String {

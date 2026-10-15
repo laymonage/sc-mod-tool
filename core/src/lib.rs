@@ -23,6 +23,9 @@ pub struct Language {
 #[derive(Clone, Debug)]
 pub struct Bank {
     pub name: String,
+    /// The extra map whose folder holds the bank, such as `1_6_1_1kolacell`,
+    /// or `None` for the language's own banks. Maps reuse bank names.
+    pub map: Option<String>,
     pub path: String,
     pub code: String,
     pub size: u64,
@@ -119,29 +122,43 @@ pub fn discover_banks_with_progress(
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Bank>, Error> {
     let sounds = find_sounds_directory(root)?;
-    let language_root = if language == "." {
-        sounds.clone()
-    } else {
-        let language_path = safe_child_path(&sounds, language)?;
-        if !language_path.is_dir() {
+    let mut folders = vec![LanguageFolder {
+        map: None,
+        relative_path: language.to_owned(),
+    }];
+    if language != "." {
+        if !safe_child_path(&sounds, language)?.is_dir() {
             return Err(format!("Language folder was not found: {language}").into());
         }
-        language_path
-    };
+        folders.extend(map_language_folders(&sounds, language)?);
+    }
 
     let mut files = Vec::new();
-    collect_banks(&language_root, Path::new(""), &mut files)?;
-    files.sort_by(|left, right| {
-        left.1
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .cmp(&right.1.to_string_lossy().to_ascii_lowercase())
-    });
+    for folder in &folders {
+        let mut folder_files = Vec::new();
+        let absolute_path = safe_child_path(&sounds, &folder.relative_path)?;
+        collect_banks(
+            &absolute_path,
+            Path::new(&folder.relative_path),
+            &mut folder_files,
+        )?;
+        folder_files.sort_by(|left, right| {
+            left.1
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .cmp(&right.1.to_string_lossy().to_ascii_lowercase())
+        });
+        files.extend(
+            folder_files
+                .into_iter()
+                .map(|(absolute, relative)| (absolute, relative, folder.map.clone())),
+        );
+    }
 
     let mut banks = Vec::with_capacity(files.len());
     let total = files.len();
     progress(0, total, "");
-    for (index, (absolute_path, relative_path)) in files.into_iter().enumerate() {
+    for (index, (absolute_path, relative_path, map)) in files.into_iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
@@ -153,10 +170,7 @@ pub fn discover_banks_with_progress(
             .ok_or_else(|| format!("Bank path is not valid UTF-8: {}", absolute_path.display()))?
             .to_owned();
         let code = mission_code(&name).unwrap_or_default();
-        let path = PathBuf::from(language)
-            .join(relative_path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let path = relative_path.to_string_lossy().replace('\\', "/");
         let segments = scan_bank(&bytes, &name, &path, language, &code, cancelled)?;
         let issue = if segments.is_empty() {
             Some(diagnose_unrecognized_bank(&bytes))
@@ -165,6 +179,7 @@ pub fn discover_banks_with_progress(
         };
         banks.push(Bank {
             name,
+            map,
             path,
             code,
             size: bytes.len() as u64,
@@ -337,6 +352,50 @@ fn collect_banks(
     Ok(())
 }
 
+/// A folder of one language's banks, relative to `Sounds`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LanguageFolder {
+    /// The extra map the folder belongs to, or `None` for the language's own
+    /// folder.
+    pub(crate) map: Option<String>,
+    pub(crate) relative_path: String,
+}
+
+/// Finds `language`'s folders in the extra maps beside the languages under
+/// `Sounds`, such as `1_6_1_1kolacell/English`, sorted by map name. Each map
+/// has its own banks and `MAPS.LM0` for each language it ships.
+pub(crate) fn map_language_folders(
+    sounds: &Path,
+    language: &str,
+) -> Result<Vec<LanguageFolder>, String> {
+    let Some(language) = known_language(language) else {
+        return Ok(Vec::new());
+    };
+    let mut folders = Vec::new();
+    for entry in read_directory(sounds)? {
+        let map = entry.file_name().to_string_lossy().into_owned();
+        if !entry.path().is_dir() || known_language(&map).is_some() {
+            continue;
+        }
+        for child in read_directory(&entry.path())? {
+            let child_name = child.file_name().to_string_lossy().into_owned();
+            if child.path().is_dir() && known_language(&child_name).as_ref() == Some(&language) {
+                folders.push(LanguageFolder {
+                    relative_path: format!("{map}/{child_name}"),
+                    map: Some(map.clone()),
+                });
+            }
+        }
+    }
+    folders.sort_by(|left, right| {
+        left.relative_path
+            .to_ascii_lowercase()
+            .cmp(&right.relative_path.to_ascii_lowercase())
+    });
+    Ok(folders)
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct KnownLanguage {
     label: &'static str,
     /// The extension of the game's localization files, such as `Echelon.int`.
@@ -445,7 +504,7 @@ fn scan_bank(
             || code_count == 0
             || code_count > CODES_PER_FRAME
             || last_code_count > CODES_PER_FRAME
-            || bits_per_sample != 4
+            || !matches!(bits_per_sample, 4 | 6)
             || channels != 1
             || !offset
                 .checked_add(BANK_HEADER_SIZE + FRAME_HEADER_SIZE)
@@ -530,7 +589,11 @@ fn scan_bank(
             sample_count,
             sample_rate: if sample_rate == 0 { 36000 } else { sample_rate },
             channels,
-            codec: "Ubisoft ADPCM 4-bit",
+            codec: if bits_per_sample == 6 {
+                "Ubisoft ADPCM 6-bit"
+            } else {
+                "Ubisoft ADPCM 4-bit"
+            },
             segment: segments.len(),
         });
         offset = frame_offset;
@@ -552,14 +615,16 @@ fn diagnose_unrecognized_bank(bytes: &[u8]) -> String {
         }
         let bits_per_sample = read_u32_le(bytes, 36).unwrap_or(0);
         let channels = read_u32_le(bytes, 44).unwrap_or(0);
-        if bits_per_sample != 4 || channels != 1 {
+        if !matches!(bits_per_sample, 4 | 6) || channels != 1 {
             return format!(
-                "Unsupported stream shape: {bits_per_sample}-bit, {channels} channels. This MVP supports mono 4-bit streams."
+                "Unsupported stream shape: {bits_per_sample}-bit, {channels} channels. This tool supports mono 4-bit and 6-bit streams."
             );
         }
-        return "A mono 4-bit stream header was found, but no complete valid frames could be parsed; the bank may be malformed or truncated.".to_owned();
+        return format!(
+            "A mono {bits_per_sample}-bit stream header was found, but no complete valid frames could be parsed; the bank may be malformed or truncated."
+        );
     }
-    "No supported mono 4-bit streams were recognized; this bank may use an unsupported layout or contain malformed data.".to_owned()
+    "No supported mono 4-bit or 6-bit streams were recognized; this bank may use an unsupported layout or contain malformed data.".to_owned()
 }
 
 #[cfg(test)]
@@ -570,7 +635,13 @@ mod tests {
     /// A minimal valid segment: one mono 4-bit subframe of four samples at
     /// 36 kHz, followed by its frame header and code bytes.
     pub(crate) fn make_segment() -> Vec<u8> {
-        let mut bytes = vec![0; 103];
+        make_segment_with_bits(4)
+    }
+
+    /// Like [`make_segment`], with `bits` per code.
+    pub(crate) fn make_segment_with_bits(bits: u32) -> Vec<u8> {
+        let codes_length = (4 * bits as usize) / 8 + 1;
+        let mut bytes = vec![0; BANK_HEADER_SIZE + FRAME_HEADER_SIZE + codes_length];
         for (offset, value) in [
             (0, 8_u32),
             (4, 4),
@@ -579,7 +650,7 @@ mod tests {
             (16, 4),
             (20, 2),
             (24, 36000),
-            (36, 4),
+            (36, bits),
             (44, 1),
             (48, 2),
         ] {
@@ -707,14 +778,21 @@ mod tests {
     }
 
     #[test]
-    fn skips_extra_map_folders_when_discovering_languages() {
+    fn finds_extra_map_banks_under_their_language_instead_of_as_languages() {
         let game = tempfile::tempdir().unwrap();
         let italian = game.path().join("Sounds/ITALIEN");
-        let extra_map = game.path().join("Sounds/1_6_1_1kolacell/English");
+        let extra_map = game.path().join("Sounds/1_6_1_1kolacell");
         fs::create_dir_all(&italian).unwrap();
-        fs::create_dir_all(&extra_map).unwrap();
+        fs::create_dir_all(extra_map.join("English")).unwrap();
+        fs::create_dir_all(extra_map.join("Italien")).unwrap();
         fs::write(italian.join("1_1_0.LS0"), make_segment()).unwrap();
-        fs::write(extra_map.join("3_4_2.LS0"), make_segment()).unwrap();
+        fs::write(extra_map.join("English/3_4_2.LS0"), make_segment()).unwrap();
+        // Extra maps' banks use 6-bit codes.
+        fs::write(
+            extra_map.join("Italien/3_4_2.LS0"),
+            make_segment_with_bits(6),
+        )
+        .unwrap();
 
         let languages = discover_languages(game.path()).unwrap();
         assert_eq!(
@@ -724,6 +802,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("ITALIEN", "Italian")]
         );
+
+        let banks = discover_banks(game.path(), "ITALIEN").unwrap();
+        assert_eq!(
+            banks
+                .iter()
+                .map(|bank| (bank.path.as_str(), bank.map.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("ITALIEN/1_1_0.LS0", None),
+                ("1_6_1_1kolacell/Italien/3_4_2.LS0", Some("1_6_1_1kolacell")),
+            ]
+        );
+        assert_eq!(
+            banks[1].segments[0].id,
+            "1_6_1_1kolacell/Italien/3_4_2.LS0:0"
+        );
+        assert_eq!(banks[1].segments[0].codec, "Ubisoft ADPCM 6-bit");
+        read_segment(
+            game.path(),
+            &banks[1].path,
+            0,
+            banks[1].segments[0].byte_length,
+        )
+        .unwrap();
     }
 
     #[test]

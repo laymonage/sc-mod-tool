@@ -1,7 +1,7 @@
 # SC Mod Tool
 
 A read-only browser for Splinter Cell 1 sound banks, built with Rust and egui.
-It lists the mono 4-bit Ubisoft ADPCM segments in each numeric `.LS0` bank,
+It lists the mono 4-bit and 6-bit Ubisoft ADPCM segments in each numeric `.LS0` bank,
 plays them with vgmstream's decoder, and shows their subtitles. Game files are
 never modified.
 

@@ -60,7 +60,7 @@ pub fn decode(
         return Err(Error::Cancelled);
     }
     if decoded < 0 {
-        return Err("vgmstream rejected the SC1 mono 4-bit ADPCM segment.".into());
+        return Err("vgmstream rejected the SC1 mono ADPCM segment.".into());
     }
     if decoded as u32 != sample_count {
         return Err(format!(
@@ -90,6 +90,16 @@ mod tests {
         let decoded = decode(&bytes, 4, &cancelled).unwrap();
         assert_eq!(decoded.samples.len(), 4);
         assert_eq!(decoded.sample_rate, 36000);
+    }
+
+    #[test]
+    fn decodes_a_minimal_6_bit_segment() {
+        // Extra maps' banks use 6-bit codes.
+        let bytes = crate::tests::make_segment_with_bits(6);
+
+        let cancelled = AtomicBool::new(false);
+        let decoded = decode(&bytes, 4, &cancelled).unwrap();
+        assert_eq!(decoded.samples.len(), 4);
     }
 
     #[test]

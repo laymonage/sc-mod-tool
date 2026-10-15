@@ -11,7 +11,7 @@ use encoding_rs::WINDOWS_1252;
 use serde::Deserialize;
 
 use crate::Error;
-use crate::sound_keys::{self, KeyCorrections};
+use crate::sound_keys::{self, KeyCorrections, PackageKeys};
 
 const MAP_RECORD_SIZE: usize = 56;
 #[cfg(feature = "uelib-bridge")]
@@ -94,6 +94,7 @@ pub struct CompiledLinks {
     issues: Vec<String>,
     patterns: Vec<BridgePattern>,
     corrections: KeyCorrections,
+    package_keys: Vec<PackageKeys>,
 }
 
 /// A script pattern's sound references, in script order.
@@ -165,6 +166,18 @@ pub(crate) struct MapRecord {
     bank: Option<String>,
 }
 
+/// A `MAPS.LM0` and the banks it describes: the language's own folder, or one
+/// of an extra map's language folders, which have their own banks and maps.
+struct SoundMap<'a> {
+    /// The folder, relative to `Sounds`, such as `1_7_1_2Vselka/English`.
+    folder: String,
+    records: HashMap<u32, HashSet<MapRecord>>,
+    banks: Vec<&'a super::Bank>,
+    /// IDs of packages this map was made for another version of, whose keys
+    /// point at other audio here.
+    foreign_packages: HashSet<u32>,
+}
+
 /// Matches `language`'s sound banks to subtitle cues.
 ///
 /// `compiled_links` caches the UELib analysis for the game at `root`. Pass
@@ -192,11 +205,26 @@ pub fn load_verified_subtitles(
             sounds.display()
         )
     })?;
-    let language_root = super::safe_child_path(&sounds, language)?;
-    let map_path = find_file(&language_root, "MAPS.LM0")?;
-    let map_data = fs::read(&map_path)
-        .map_err(|error| format!("Could not read {}: {error}", map_path.display()))?;
-    let map_records = parse_map_records(&map_data);
+    let mut folders = vec![super::LanguageFolder {
+        map: None,
+        relative_path: language.to_owned(),
+    }];
+    folders.extend(super::map_language_folders(&sounds, language)?);
+    let mut maps = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let map_path = find_file(
+            &super::safe_child_path(&sounds, &folder.relative_path)?,
+            "MAPS.LM0",
+        )?;
+        let map_data = fs::read(&map_path)
+            .map_err(|error| format!("Could not read {}: {error}", map_path.display()))?;
+        maps.push(SoundMap {
+            records: parse_map_records(&map_data),
+            banks: banks.iter().filter(|bank| bank.map == folder.map).collect(),
+            folder: folder.relative_path,
+            foreign_packages: HashSet::new(),
+        });
+    }
 
     let bridge = match compiled_links {
         Some(links) => Arc::clone(links),
@@ -217,12 +245,14 @@ pub fn load_verified_subtitles(
                 .collect();
             let corrections =
                 sound_keys::correct(game_root, &sounds, &result.sound_packages, &played);
+            let package_keys = sound_keys::package_keys(&result.sound_packages, &corrections);
             compiled_links
                 .insert(Arc::new(CompiledLinks {
                     links: result.links,
                     issues: result.issues,
                     patterns: result.patterns,
                     corrections,
+                    package_keys,
                 }))
                 .clone()
         }
@@ -246,6 +276,9 @@ pub fn load_verified_subtitles(
     for note in &bridge.corrections.notes {
         push_warning(&mut analysis.warnings, note.clone());
     }
+    for map in &mut maps {
+        mark_foreign_packages(map, &bridge.package_keys, &mut analysis.warnings);
+    }
     if bridge.links.is_empty() {
         push_warning(
             &mut analysis.warnings,
@@ -260,8 +293,8 @@ pub fn load_verified_subtitles(
             .corrections
             .key(&link.sound_event)
             .unwrap_or(link.sound_map_key);
-        let segment = match resolve_segment(&link.sound_event, key, &map_records, banks) {
-            Ok(segment) => segment,
+        let segments = match resolve_segments(&link.sound_event, key, &maps) {
+            Ok(segments) => segments,
             Err(warning) => {
                 push_warning(&mut analysis.warnings, warning);
                 continue;
@@ -307,18 +340,20 @@ pub fn load_verified_subtitles(
             }
         };
 
-        add_subtitle(
-            &mut analysis,
-            &segment.id,
-            Subtitle {
-                cue: link.cue.clone(),
-                text: line_text(&text),
-                sources: vec![format!("{}: {}", link.source_package, link.source_object)],
-                sound_event: link.sound_event.clone(),
-                sound_map_key: key,
-                confidence: MappingConfidence::ExplicitCompiledReference,
-            },
-        );
+        for segment in segments {
+            add_subtitle(
+                &mut analysis,
+                &segment.id,
+                Subtitle {
+                    cue: link.cue.clone(),
+                    text: line_text(&text),
+                    sources: vec![format!("{}: {}", link.source_package, link.source_object)],
+                    sound_event: link.sound_event.clone(),
+                    sound_map_key: key,
+                    confidence: MappingConfidence::ExplicitCompiledReference,
+                },
+            );
+        }
         analysis.mapped_pairs += 1;
     }
 
@@ -337,8 +372,7 @@ pub fn load_verified_subtitles(
                     &sections,
                     english.as_ref().unwrap_or(&sections),
                     &bridge.corrections,
-                    &map_records,
-                    banks,
+                    &maps,
                 );
             }
         }
@@ -364,6 +398,36 @@ pub fn load_verified_subtitles(
     }
     analysis.warnings.sort();
     Ok(analysis)
+}
+
+/// Finds the packages `map` was made for another version of: most of its
+/// records under the package's ID are for sounds the package doesn't have. The
+/// extra Vselka maps were made this way for `S3_1_1Voice`, so the game's keys
+/// for that package point at other lines there.
+fn mark_foreign_packages(map: &mut SoundMap, packages: &[PackageKeys], warnings: &mut Vec<String>) {
+    for package in packages {
+        let (mut known, mut unknown) = (0, 0);
+        for key in map.records.keys().filter(|key| *key >> 16 == package.id) {
+            if package.keys.contains(key) {
+                known += 1;
+            } else {
+                unknown += 1;
+            }
+        }
+        if unknown > known {
+            map.foreign_packages.insert(package.id);
+            push_warning(
+                warnings,
+                format!(
+                    "{}/MAPS.LM0 was made for another version of {}: {unknown} of its {} sounds for that package aren't in {}.uax, so the package's subtitles aren't matched there.",
+                    map.folder,
+                    package.package,
+                    known + unknown,
+                    package.package
+                ),
+            );
+        }
+    }
 }
 
 /// Adds a subtitle to a segment, merging its sources into an identical one.
@@ -407,8 +471,7 @@ fn match_unshown_subtitles(
     sections: &HashMap<String, Vec<(String, String)>>,
     reference_sections: &HashMap<String, Vec<(String, String)>>,
     corrections: &KeyCorrections,
-    map_records: &HashMap<u32, HashSet<MapRecord>>,
-    banks: &[super::Bank],
+    maps: &[SoundMap],
 ) {
     let lines = spoken_lines(sections, &pattern.pattern);
     let reference_lines = spoken_lines(reference_sections, &pattern.pattern);
@@ -424,7 +487,7 @@ fn match_unshown_subtitles(
     let key_of = |call: &BridgeCall| corrections.key(&call.sound_event).or(call.sound_map_key);
     let durations = calls
         .iter()
-        .map(|call| key_of(call).and_then(|key| clip_seconds(key, map_records)))
+        .map(|call| key_of(call).and_then(|key| clip_seconds(key, maps)))
         .collect::<Vec<_>>();
 
     let matched = match align(&pattern.pattern, &calls, &reference_lines, &durations) {
@@ -451,28 +514,30 @@ fn match_unshown_subtitles(
         let Some(key) = key_of(call) else {
             continue;
         };
-        let segment = match resolve_segment(&call.sound_event, key, map_records, banks) {
-            Ok(segment) => segment,
+        let segments = match resolve_segments(&call.sound_event, key, maps) {
+            Ok(segments) => segments,
             Err(warning) => {
                 push_warning(&mut analysis.warnings, warning);
                 continue;
             }
         };
-        add_subtitle(
-            analysis,
-            &segment.id,
-            Subtitle {
-                cue: cue.clone(),
-                text: line_text(text),
-                sources: vec![format!(
-                    "{}: {}",
-                    pattern.source_package, call.source_object
-                )],
-                sound_event: call.sound_event.clone(),
-                sound_map_key: key,
-                confidence: MappingConfidence::SectionOrder,
-            },
-        );
+        for segment in segments {
+            add_subtitle(
+                analysis,
+                &segment.id,
+                Subtitle {
+                    cue: cue.clone(),
+                    text: line_text(text),
+                    sources: vec![format!(
+                        "{}: {}",
+                        pattern.source_package, call.source_object
+                    )],
+                    sound_event: call.sound_event.clone(),
+                    sound_map_key: key,
+                    confidence: MappingConfidence::SectionOrder,
+                },
+            );
+        }
         analysis.unshown_pairs += 1;
     }
 }
@@ -679,9 +744,15 @@ fn spoken_length(text: &str) -> usize {
         .count()
 }
 
-/// The duration of the clip a key's map record describes.
-fn clip_seconds(key: u32, map_records: &HashMap<u32, HashSet<MapRecord>>) -> Option<f64> {
-    let record = map_records.get(&key)?.iter().next()?;
+/// The duration of the clip a key's map record describes, from the first map
+/// that has the key.
+fn clip_seconds(key: u32, maps: &[SoundMap]) -> Option<f64> {
+    let record = maps
+        .iter()
+        .filter(|map| !map.foreign_packages.contains(&(key >> 16)))
+        .find_map(|map| map.records.get(&key))?
+        .iter()
+        .next()?;
     let rate = if record.sample_rate == 0 {
         36000
     } else {
@@ -855,11 +926,49 @@ fn read_u32(data: &[u8], position: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
+/// Finds a sound's segment in every map that has it. Extra maps ship their own
+/// copies of some banks, so a sound can have a segment in each.
+fn resolve_segments<'a>(
+    sound_event: &str,
+    key: u32,
+    maps: &[SoundMap<'a>],
+) -> Result<Vec<&'a super::Segment>, String> {
+    let mut segments = Vec::new();
+    let mut warning = None;
+    let mut in_foreign_map = false;
+    for map in maps {
+        if !map.records.contains_key(&key) {
+            continue;
+        }
+        if map.foreign_packages.contains(&(key >> 16)) {
+            in_foreign_map = true;
+            continue;
+        }
+        match resolve_segment(sound_event, key, &map.records, &map.banks) {
+            Ok(segment) => segments.push(segment),
+            Err(error) => warning = warning.or(Some(error)),
+        }
+    }
+    if segments.is_empty() {
+        Err(warning.unwrap_or_else(|| {
+            if in_foreign_map {
+                format!(
+                    "{sound_event} (key 0x{key:08X}) is only in maps made for another version of its package."
+                )
+            } else {
+                format!("{sound_event} (key 0x{key:08X}) has no matching entry in MAPS.LM0.")
+            }
+        }))
+    } else {
+        Ok(segments)
+    }
+}
+
 fn resolve_segment<'a>(
     sound_event: &str,
     key: u32,
     map_records: &HashMap<u32, HashSet<MapRecord>>,
-    banks: &'a [super::Bank],
+    banks: &[&'a super::Bank],
 ) -> Result<&'a super::Segment, String> {
     let Some(records) = map_records.get(&key) else {
         return Err(format!(
@@ -1112,9 +1221,22 @@ mod tests {
         );
     }
 
+    fn test_maps(
+        records: HashMap<u32, HashSet<MapRecord>>,
+        banks: &[super::super::Bank],
+    ) -> Vec<SoundMap<'_>> {
+        vec![SoundMap {
+            folder: "ENGLISH".to_owned(),
+            records,
+            banks: banks.iter().collect(),
+            foreign_packages: HashSet::new(),
+        }]
+    }
+
     fn test_bank(offsets: &[u64]) -> Vec<super::super::Bank> {
         vec![super::super::Bank {
             name: "1_1_2.LS0".to_owned(),
+            map: None,
             path: "ENGLISH/1_1_2.LS0".to_owned(),
             code: "1_1_2".to_owned(),
             size: 0,
@@ -1217,8 +1339,7 @@ mod tests {
             &sections,
             &sections,
             &KeyCorrections::default(),
-            &records,
-            &banks,
+            &test_maps(records, &banks),
         );
 
         assert_eq!(analysis.unshown_pairs, 3);
@@ -1262,8 +1383,7 @@ mod tests {
             &german,
             &english,
             &KeyCorrections::default(),
-            &records,
-            &banks,
+            &test_maps(records, &banks),
         );
 
         assert_eq!(analysis.unshown_pairs, 2);
@@ -1306,8 +1426,7 @@ mod tests {
             &sections,
             &sections,
             &KeyCorrections::default(),
-            &records,
-            &banks,
+            &test_maps(records, &banks),
         );
 
         let empty = &analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0];
@@ -1366,8 +1485,7 @@ mod tests {
             &sections,
             &sections,
             &KeyCorrections::default(),
-            &records,
-            &banks,
+            &test_maps(records, &banks),
         );
 
         assert_eq!(analysis.unshown_pairs, 2);
@@ -1376,6 +1494,117 @@ mod tests {
                 .text
                 .as_deref(),
             Some("We're being attacked.")
+        );
+    }
+
+    #[test]
+    fn finds_a_sound_in_each_map_with_its_own_banks() {
+        // Both maps ship a different 3_1_1.LS0, and their records point at
+        // different offsets for the same key.
+        let map_bank = |map: &str, offsets: &[u64]| {
+            let mut bank = test_bank(offsets).remove(0);
+            bank.name = "3_1_1.LS0".to_owned();
+            bank.code = "3_1_1".to_owned();
+            bank.map = Some(map.to_owned());
+            bank.path = format!("{map}/English/3_1_1.LS0");
+            for segment in &mut bank.segments {
+                segment.id = format!("{}:{}", bank.path, segment.offset);
+            }
+            bank
+        };
+        let banks = [
+            map_bank("1_7_1_1VselkaInfiltration", &[0, 100]),
+            map_bank("1_7_1_2Vselka", &[0, 100]),
+        ];
+        let map = |folder: &str, records, banks| SoundMap {
+            folder: folder.to_owned(),
+            records,
+            banks,
+            foreign_packages: HashSet::new(),
+        };
+        let maps = [
+            map(
+                "1_7_1_1VselkaInfiltration/English",
+                test_records(&[(7, 0)]),
+                vec![&banks[0]],
+            ),
+            map(
+                "1_7_1_2Vselka/English",
+                test_records(&[(7, 100)]),
+                vec![&banks[1]],
+            ),
+            map("ENGLISH", HashMap::new(), Vec::new()),
+        ];
+
+        let segments = resolve_segments("S3_1_1Voice.Play_31_01_01", 7, &maps).unwrap();
+
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "1_7_1_1VselkaInfiltration/English/3_1_1.LS0:0",
+                "1_7_1_2Vselka/English/3_1_1.LS0:100",
+            ]
+        );
+        assert_eq!(
+            resolve_segments("S3_1_1Voice.Play_31_01_01", 8, &maps).unwrap_err(),
+            "S3_1_1Voice.Play_31_01_01 (key 0x00000008) has no matching entry in MAPS.LM0."
+        );
+    }
+
+    #[test]
+    fn skips_packages_a_map_was_made_for_another_version_of() {
+        // The package has sounds 0x450000-0x450002. The extra map files three
+        // sounds under its ID, two of which the package doesn't have, so its
+        // key 0x450001 means some other line there.
+        let banks = test_bank(&[0, 100, 200]);
+        let package = PackageKeys {
+            package: "S1_1_2Voice".to_owned(),
+            id: 0x45,
+            keys: HashSet::from([0x450000, 0x450001, 0x450002]),
+        };
+        let mut maps = vec![
+            SoundMap {
+                folder: "ENGLISH".to_owned(),
+                records: test_records(&[(0x450000, 0), (0x450001, 100)]),
+                banks: vec![&banks[0]],
+                foreign_packages: HashSet::new(),
+            },
+            SoundMap {
+                folder: "1_7_1_2Vselka/English".to_owned(),
+                records: test_records(&[(0x450001, 100), (0x450070, 0), (0x450071, 200)]),
+                banks: vec![&banks[0]],
+                foreign_packages: HashSet::new(),
+            },
+        ];
+        let mut warnings = Vec::new();
+
+        for map in &mut maps {
+            mark_foreign_packages(map, std::slice::from_ref(&package), &mut warnings);
+        }
+
+        assert!(maps[0].foreign_packages.is_empty());
+        assert_eq!(maps[1].foreign_packages, HashSet::from([0x45]));
+        assert_eq!(
+            warnings,
+            [
+                "1_7_1_2Vselka/English/MAPS.LM0 was made for another version of S1_1_2Voice: 2 of its 3 sounds for that package aren't in S1_1_2Voice.uax, so the package's subtitles aren't matched there."
+            ]
+        );
+        let segments = resolve_segments("S1_1_2Voice.Play_11_38_02", 0x450001, &maps).unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ENGLISH/1_1_2.LS0:100"]
+        );
+        maps.remove(0);
+        assert_eq!(
+            resolve_segments("S1_1_2Voice.Play_11_38_02", 0x450001, &maps).unwrap_err(),
+            "S1_1_2Voice.Play_11_38_02 (key 0x00450001) is only in maps made for another version of its package."
         );
     }
 
@@ -1393,7 +1622,13 @@ mod tests {
             }]),
         );
 
-        let segment = resolve_segment("S1_3_3Voice.Play_13_21_01", 7, &records, &banks).unwrap();
+        let segment = resolve_segment(
+            "S1_3_3Voice.Play_13_21_01",
+            7,
+            &records,
+            &banks.iter().collect::<Vec<_>>(),
+        )
+        .unwrap();
 
         assert_eq!(segment.id, "ENGLISH/1_1_2.LS0:100");
     }
@@ -1424,8 +1659,7 @@ mod tests {
             &sections,
             &sections,
             &KeyCorrections::default(),
-            &records,
-            &banks,
+            &test_maps(records, &banks),
         );
 
         assert_eq!(analysis.unshown_pairs, 2);
@@ -1470,8 +1704,7 @@ mod tests {
             &sections,
             &sections,
             &KeyCorrections::default(),
-            &records,
-            &banks,
+            &test_maps(records, &banks),
         );
 
         assert_eq!(analysis.unshown_pairs, 2);
@@ -1486,7 +1719,7 @@ mod tests {
     #[test]
     fn skips_patterns_whose_lines_dont_line_up() {
         let banks = test_bank(&[0, 100]);
-        let records = test_records(&[(1, 0), (2, 100)]);
+        let maps = test_maps(test_records(&[(1, 0), (2, 100)]), &banks);
         let mut sections = HashMap::new();
         parse_sections(
             "[P_Talk]\nSpeech_0001L=One.\nSpeech_0002L=Two.\nSpeech_0003L=Six.\n",
@@ -1518,8 +1751,7 @@ mod tests {
                 &sections,
                 &sections,
                 &KeyCorrections::default(),
-                &records,
-                &banks,
+                &maps,
             );
         }
 
