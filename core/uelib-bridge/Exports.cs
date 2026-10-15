@@ -15,6 +15,10 @@ public static unsafe class Exports
     {
         try
         {
+            // UELib prints a summary of every package it loads, which would
+            // mix into the host program's stdout.
+            Console.SetOut(TextWriter.Null);
+
             var gameRoot = Marshal.PtrToStringUTF8((nint)gameRootUtf8);
             if (gameRoot is null)
             {
