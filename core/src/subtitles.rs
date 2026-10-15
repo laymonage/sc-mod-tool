@@ -712,7 +712,7 @@ fn skipping_alignment(
 /// than `limit`.
 fn combinations(total: usize, count: usize, limit: usize) -> Option<Vec<Vec<usize>>> {
     let mut size = 1usize;
-    for index in 0..count {
+    for index in 0..count.min(total - count) {
         size = size.checked_mul(total - index)? / (index + 1);
         if size > limit {
             return None;
@@ -1477,6 +1477,7 @@ mod tests {
         );
         assert_eq!(combinations(3, 0, 10).unwrap(), [Vec::<usize>::new()]);
         assert!(combinations(40, 4, 200).is_none());
+        assert_eq!(combinations(10, 9, 200).unwrap().len(), 10);
     }
 
     #[test]
