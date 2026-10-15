@@ -1117,13 +1117,7 @@ fn find_cue(text: &str, section: &str, cue: &str) -> Result<String, String> {
                     "Localization cue {cue} occurs more than once in section {section}."
                 ));
             }
-            let value = value.trim();
-            if value.is_empty() {
-                return Err(format!(
-                    "Localization cue {cue} is empty in section {section}."
-                ));
-            }
-            found = Some(value.to_owned());
+            found = Some(value.trim().to_owned());
         }
     }
 
@@ -1202,6 +1196,12 @@ mod tests {
         let duplicate = "[Pilot]\nSpeech_0001L=First\nSpeech_0001L=Second\n";
         assert!(find_cue(duplicate, "Pilot", "Speech_0001L").is_err());
         assert!(find_cue("[Pilot]\n", "Pilot", "Speech_0001L").is_err());
+    }
+
+    #[test]
+    fn keeps_empty_cues_as_lines_without_text() {
+        let text = find_cue("[Pilot]\nSpeech_0001L=\n", "Pilot", "Speech_0001L").unwrap();
+        assert_eq!(line_text(&text), None);
     }
 
     #[test]
