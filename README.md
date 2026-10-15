@@ -5,9 +5,11 @@ It lists the mono 4-bit Ubisoft ADPCM segments in each numeric `.LS0` bank,
 plays them with vgmstream's decoder, and shows their subtitles. Game files are
 never modified.
 
-Subtitles come from direct `Localize`/`Sound` pairs in the game's compiled
-UnrealScript, matched to segments through `.uax` sound keys and `MAPS.LM0`.
-Sequence-based associations aren't inferred.
+Subtitles come from the game's compiled UnrealScript and localization files,
+matched to segments through `.uax` sound keys and `MAPS.LM0`. This includes
+lines the game plays without showing a subtitle. See
+[docs/subtitle-mapping.md](docs/subtitle-mapping.md) for how the matching works
+and the quirks in the game data it works around.
 
 The `core` crate has no UI code, so it can back CLIs too.
 
