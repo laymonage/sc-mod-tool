@@ -5,53 +5,137 @@ namespace SCModUELibBridge;
 /// <summary>Finds direct subtitle and sound pairs in decompiled UnrealScript.</summary>
 internal static class DirectPairs
 {
+    private const string LocalizeName = "Localize";
+    private const string SoundName = "Sound";
+
     /// <summary>
     /// Finds <c>Localize(section, cue, file), Sound'Package.Event'</c> argument
     /// pairs, where a localized cue is passed straight alongside the sound it voices.
     /// </summary>
     internal static IEnumerable<DirectPair> Find(string script)
     {
-        const string localizeName = "Localize";
         var position = 0;
-        while ((position = script.IndexOf(localizeName, position, StringComparison.Ordinal)) >= 0)
+        while ((position = script.IndexOf(LocalizeName, position, StringComparison.Ordinal)) >= 0)
         {
-            var start = position;
-            position += localizeName.Length;
-            if ((start > 0 && IsIdentifier(script[start - 1]))
-                || (position < script.Length && IsIdentifier(script[position])))
+            if (TryReadPair(script, position, out var pair, out _))
             {
-                continue;
+                yield return pair;
             }
-
-            var cursor = position;
-            SkipWhitespace(script, ref cursor);
-            if (!ReadCharacter(script, ref cursor, '(')
-                || !ReadStringArgument(script, ref cursor, out var section)
-                || !ReadCharacter(script, ref cursor, ',')
-                || !ReadStringArgument(script, ref cursor, out var cue)
-                || !ReadCharacter(script, ref cursor, ',')
-                || !ReadStringArgument(script, ref cursor, out var localizationPath)
-                || !ReadCharacter(script, ref cursor, ')'))
-            {
-                continue;
-            }
-
-            SkipWhitespace(script, ref cursor);
-            if (!ReadCharacter(script, ref cursor, ','))
-            {
-                continue;
-            }
-
-            SkipWhitespace(script, ref cursor);
-            if (!ReadIdentifier(script, ref cursor, "Sound")
-                || !ReadQuotedValue(script, ref cursor, '\'', out var soundReference)
-                || !TrySplitSoundReference(soundReference, out var soundPackage, out var soundEvent))
-            {
-                continue;
-            }
-
-            yield return new DirectPair(section, cue, localizationPath, soundPackage, soundEvent);
+            position += LocalizeName.Length;
         }
+    }
+
+    /// <summary>
+    /// Finds every <c>Sound'Package.Event'</c> reference in script order. A sound
+    /// passed straight after a <c>Localize(...)</c> call carries that cue.
+    /// </summary>
+    internal static IEnumerable<SoundCall> FindSoundCalls(string script)
+    {
+        var position = 0;
+        while (position < script.Length)
+        {
+            var localize = script.IndexOf(LocalizeName, position, StringComparison.Ordinal);
+            var sound = script.IndexOf(SoundName + "'", position, StringComparison.Ordinal);
+            if (localize < 0 && sound < 0)
+            {
+                yield break;
+            }
+
+            if (localize >= 0 && (sound < 0 || localize < sound))
+            {
+                if (TryReadPair(script, localize, out var pair, out var end))
+                {
+                    yield return new SoundCall(pair.SoundPackage, pair.SoundEvent, pair, CallingFunction(script, localize));
+                    position = end;
+                }
+                else
+                {
+                    position = localize + LocalizeName.Length;
+                }
+                continue;
+            }
+
+            var cursor = sound;
+            if ((sound == 0 || !IsIdentifier(script[sound - 1]))
+                && ReadIdentifier(script, ref cursor, SoundName)
+                && ReadQuotedValue(script, ref cursor, '\'', out var reference)
+                && TrySplitSoundReference(reference, out var soundPackage, out var soundEvent))
+            {
+                yield return new SoundCall(soundPackage, soundEvent, null, CallingFunction(script, sound));
+                position = cursor;
+            }
+            else
+            {
+                position = sound + SoundName.Length;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns the name of the function whose first argument starts at
+    /// <paramref name="argument"/>, such as <c>__NFUN_1408__</c>.
+    /// </summary>
+    private static string? CallingFunction(string script, int argument)
+    {
+        var cursor = argument - 1;
+        while (cursor >= 0 && char.IsWhiteSpace(script[cursor]))
+        {
+            cursor--;
+        }
+        if (cursor < 0 || script[cursor] != '(')
+        {
+            return null;
+        }
+
+        var end = cursor;
+        while (cursor > 0 && IsIdentifier(script[cursor - 1]))
+        {
+            cursor--;
+        }
+        return cursor < end ? script[cursor..end] : null;
+    }
+
+    /// <summary>Reads a direct pair starting at a <c>Localize</c> name.</summary>
+    private static bool TryReadPair(string script, int start, out DirectPair pair, out int end)
+    {
+        pair = null!;
+        end = start;
+        var cursor = start + LocalizeName.Length;
+        if ((start > 0 && IsIdentifier(script[start - 1]))
+            || (cursor < script.Length && IsIdentifier(script[cursor])))
+        {
+            return false;
+        }
+
+        SkipWhitespace(script, ref cursor);
+        if (!ReadCharacter(script, ref cursor, '(')
+            || !ReadStringArgument(script, ref cursor, out var section)
+            || !ReadCharacter(script, ref cursor, ',')
+            || !ReadStringArgument(script, ref cursor, out var cue)
+            || !ReadCharacter(script, ref cursor, ',')
+            || !ReadStringArgument(script, ref cursor, out var localizationPath)
+            || !ReadCharacter(script, ref cursor, ')'))
+        {
+            return false;
+        }
+
+        SkipWhitespace(script, ref cursor);
+        if (!ReadCharacter(script, ref cursor, ','))
+        {
+            return false;
+        }
+
+        SkipWhitespace(script, ref cursor);
+        if (!ReadIdentifier(script, ref cursor, SoundName)
+            || !ReadQuotedValue(script, ref cursor, '\'', out var soundReference)
+            || !TrySplitSoundReference(soundReference, out var soundPackage, out var soundEvent))
+        {
+            return false;
+        }
+
+        pair = new DirectPair(section, cue, localizationPath, soundPackage, soundEvent);
+        end = cursor;
+        return true;
     }
 
     private static bool TrySplitSoundReference(string reference, out string soundPackage, out string soundEvent)
@@ -158,3 +242,9 @@ internal sealed record DirectPair(
     string LocalizationPath,
     string SoundPackage,
     string SoundEvent);
+
+/// <summary>
+/// A sound reference, with its cue when it's part of a direct pair, and the
+/// function it's the first argument of, if any.
+/// </summary>
+internal sealed record SoundCall(string SoundPackage, string SoundEvent, DirectPair? Pair, string? Function);

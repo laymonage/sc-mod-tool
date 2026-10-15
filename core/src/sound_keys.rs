@@ -3,10 +3,12 @@
 //! Each `Sound` export stores the key of its audio in `MAPS.LM0`, but in a few
 //! packages those keys are scrambled in small, local ways: a run of
 //! consecutive keys is stored in reverse, two neighbouring exports have each
-//! other's keys, or a sound points next to the key it should use. The game
-//! plays the right audio regardless, and lip-sync files (which record each
-//! sound's duration) agree with what it plays, so they're used here to detect
-//! and undo each kind of scrambling.
+//! other's keys, a sound points next to the key it should use, or a sound added
+//! late points at a key with no audio while its audio sits under a free key.
+//! The game plays the right audio regardless, and lip-sync files (which record
+//! each sound's duration) agree with what it plays, so they're used here to
+//! detect and undo the first three kinds. The last is undone only when the
+//! package has exactly one such sound and one such clip.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -52,10 +54,13 @@ impl KeyCorrections {
 
 /// Finds corrections for every package, using the English lip-sync files and
 /// the English map, the only language the game ships lip-sync data for.
+///
+/// `played` holds the lowercased `Package.Sound` names that scripts play.
 pub(crate) fn correct(
     game_root: &Path,
     sounds: &Path,
     packages: &[SoundPackage],
+    played: &HashSet<String>,
 ) -> KeyCorrections {
     let mut corrections = KeyCorrections::default();
     let Some(lip_sync_root) = find_file(game_root, "LIPSYNCH")
@@ -85,6 +90,8 @@ pub(crate) fn correct(
                     .lip_sync_path
                     .as_deref()
                     .and_then(|path| lip_sync_duration(&lip_sync_root, path)),
+                played: played
+                    .contains(&format!("{}.{}", package.package, sound.name).to_ascii_lowercase()),
             })
             .collect::<Vec<_>>();
         let (keys, changes) = correct_package(&candidates, &durations);
@@ -139,6 +146,8 @@ struct Candidate<'a> {
     key: u32,
     /// The sound's duration according to its lip-sync file, in seconds.
     lip_sync: Option<f64>,
+    /// Whether a script plays the sound.
+    played: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -146,6 +155,7 @@ enum Change {
     Reversed { first: u32, last: u32, count: usize },
     Swapped { first: String, second: String },
     Moved { name: String, from: u32, to: u32 },
+    Paired { name: String, from: u32, to: u32 },
 }
 
 impl Change {
@@ -159,6 +169,9 @@ impl Change {
             ),
             Change::Moved { name, from, to } => format!(
                 "{package}: moved {name} from key 0x{from:08X} to unused key 0x{to:08X} to match its lip-sync duration."
+            ),
+            Change::Paired { name, from, to } => format!(
+                "{package}: moved {name} from key 0x{from:08X}, which has no audio, to key 0x{to:08X}, the package's only audio without a sound."
             ),
         }
     }
@@ -269,6 +282,29 @@ fn correct_package(sounds: &[Candidate], durations: &HashMap<u32, f64>) -> (Vec<
         }
     }
 
+    // A sound added late can point at a key with no audio, while its audio sits
+    // under a key no sound owns. With exactly one of each, they belong together.
+    let prefixes = keys.iter().map(|key| key >> 16).collect::<HashSet<_>>();
+    if let [prefix] = prefixes.into_iter().collect::<Vec<_>>()[..] {
+        let current = keys.iter().copied().collect::<HashSet<_>>();
+        let unowned = durations
+            .keys()
+            .filter(|key| *key >> 16 == prefix && !current.contains(key))
+            .copied()
+            .collect::<Vec<_>>();
+        let silent = (0..sounds.len())
+            .filter(|&index| sounds[index].played && !durations.contains_key(&keys[index]))
+            .collect::<Vec<_>>();
+        if let (&[to], &[index]) = (unowned.as_slice(), silent.as_slice()) {
+            changes.push(Change::Paired {
+                name: sounds[index].name.to_owned(),
+                from: keys[index],
+                to,
+            });
+            keys[index] = to;
+        }
+    }
+
     (keys, changes)
 }
 
@@ -282,7 +318,47 @@ mod tests {
             export_index,
             key,
             lip_sync,
+            played: true,
         }
+    }
+
+    #[test]
+    fn pairs_the_only_played_sound_without_audio_with_the_only_unowned_clip() {
+        let durations = HashMap::from([(0x10, 27.7), (0x11, 1.0), (0x12, 2.0)]);
+        let mut cut_line = candidate("Play_Cut", 2, 0x40, None);
+        cut_line.played = false;
+        let sounds = [
+            candidate("Play_A", 0, 0x11, None),
+            candidate("Play_B", 1, 0x12, None),
+            cut_line,
+            candidate("Play_Late", 3, 0x41, None),
+        ];
+
+        let (keys, changes) = correct_package(&sounds, &durations);
+
+        assert_eq!(keys, [0x11, 0x12, 0x40, 0x10]);
+        assert_eq!(
+            changes,
+            [Change::Paired {
+                name: "Play_Late".to_owned(),
+                from: 0x41,
+                to: 0x10
+            }]
+        );
+    }
+
+    #[test]
+    fn leaves_sounds_without_audio_alone_when_the_pairing_is_ambiguous() {
+        let durations = HashMap::from([(0x10, 27.7), (0x11, 1.0), (0x12, 2.0)]);
+        let sounds = [
+            candidate("Play_A", 0, 0x11, None),
+            candidate("Play_Late", 1, 0x41, None),
+        ];
+
+        let (keys, changes) = correct_package(&sounds, &durations);
+
+        assert_eq!(keys, [0x11, 0x41]);
+        assert!(changes.is_empty());
     }
 
     #[test]

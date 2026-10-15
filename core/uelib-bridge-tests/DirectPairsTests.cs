@@ -104,4 +104,45 @@ public class DirectPairsTests
     {
         Assert.Empty(Find(script));
     }
+
+    [Fact]
+    public void FindsEverySoundCallInScriptOrder()
+    {
+        var calls = DirectPairs.FindSoundCalls(
+            """
+            PlaySound(Sound'Pkg.First', 0);
+            Speak(Localize("A", "Cue", "Lines"), Sound'Pkg.Second');
+            Speak(Localize("A", "Other", "Lines"), 2.0, Sound'Pkg.Third');
+            Speak(Sound'Pkg.Fourth', 1);
+            """).ToArray();
+
+        Assert.Equal(["First", "Second", "Third", "Fourth"], calls.Select(call => call.SoundEvent));
+        Assert.Equal([null, "Cue", null, null], calls.Select(call => call.Pair?.Cue));
+    }
+
+    [Fact]
+    public void RecordsTheFunctionEachSoundIsPassedTo()
+    {
+        var calls = DirectPairs.FindSoundCalls(
+            """
+            __NFUN_1408__(Sound'Pkg.Talk', 1,, true);
+            __NFUN_1407__(Localize("A", "Cue", "Lines"), Sound'Pkg.Comms', 1);
+            SoundActors[0].__NFUN_264__( Sound'Pkg.Effect', 0);
+            Wait(1.0, Sound'Pkg.Later');
+            """).ToArray();
+
+        Assert.Equal(
+            ["__NFUN_1408__", "__NFUN_1407__", "__NFUN_264__", null],
+            calls.Select(call => call.Function));
+    }
+
+    [Theory]
+    [InlineData("MySound'Pkg.Event'")]
+    [InlineData("SoundCue'Pkg.Event'")]
+    [InlineData("Sound'Event'")]
+    [InlineData("Sound'Pkg.Event")]
+    public void IgnoresTextThatIsntASoundReference(string script)
+    {
+        Assert.Empty(DirectPairs.FindSoundCalls(script));
+    }
 }

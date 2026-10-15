@@ -19,7 +19,13 @@ const BRIDGE_OUTPUT_CAPACITY: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MappingConfidence {
+    /// The script passes the cue straight alongside the sound, and the game
+    /// shows it as a subtitle.
     ExplicitCompiledReference,
+    /// The game plays the sound without showing a subtitle. Its text is the
+    /// line at the same position in the localization section named after the
+    /// script's pattern.
+    SectionOrder,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +45,8 @@ pub struct SubtitleAnalysis {
     pub warnings: Vec<String>,
     pub explicit_pairs: usize,
     pub mapped_pairs: usize,
+    /// Sounds matched to text the game doesn't show, by section order.
+    pub unshown_pairs: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +69,48 @@ struct BridgeLink {
 pub struct CompiledLinks {
     links: Vec<BridgeLink>,
     issues: Vec<String>,
+    patterns: Vec<BridgePattern>,
     corrections: KeyCorrections,
+}
+
+/// A script pattern's sound references, in script order.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgePattern {
+    pattern: String,
+    source_package: String,
+    calls: Vec<BridgeCall>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeCall {
+    source_object: String,
+    sound_event: String,
+    #[serde(default)]
+    sound_map_key: Option<u32>,
+    /// Set when the sound is passed with a `Localize` cue.
+    #[serde(default)]
+    section: Option<String>,
+    #[serde(default)]
+    cue: Option<String>,
+    /// The function the sound is passed to, such as `__NFUN_1408__`.
+    #[serde(default)]
+    function: Option<String>,
+}
+
+impl BridgeCall {
+    /// Whether the call speaks a line of dialogue: a comms transmission
+    /// (native 1407, with a `Localize` cue) or a conversation line (native
+    /// 1408). Sounds played through an actor (native 264) are effects or
+    /// background voices without lines of their own.
+    fn is_dialogue(&self) -> bool {
+        self.cue.is_some()
+            || matches!(
+                self.function.as_deref(),
+                Some("__NFUN_1407__" | "__NFUN_1408__")
+            )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,17 +123,23 @@ struct BridgeResult {
     issues: Vec<String>,
     #[serde(default)]
     sound_packages: Vec<sound_keys::SoundPackage>,
+    #[serde(default)]
+    patterns: Vec<BridgePattern>,
     #[cfg(feature = "uelib-bridge")]
     error: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MapRecord {
     offset: u32,
     compressed_bytes: u32,
     pub(crate) sample_count: u32,
     /// Zero when the record is too short to include it.
     pub(crate) sample_rate: u32,
+    /// The bank file holding the audio, such as `1_3_2.LS0`. A level can play
+    /// sounds from another level's package, so this can't be inferred from the
+    /// package name.
+    bank: Option<String>,
 }
 
 /// Matches `language`'s sound banks to subtitle cues.
@@ -122,11 +177,26 @@ pub fn load_verified_subtitles(
         Some(links) => Arc::clone(links),
         None => {
             let result = scan_compiled_links(game_root)?;
-            let corrections = sound_keys::correct(game_root, &sounds, &result.sound_packages);
+            let played = result
+                .links
+                .iter()
+                .map(|link| &link.sound_event)
+                .chain(
+                    result
+                        .patterns
+                        .iter()
+                        .flat_map(|pattern| &pattern.calls)
+                        .map(|call| &call.sound_event),
+                )
+                .map(|sound_event| sound_event.to_ascii_lowercase())
+                .collect();
+            let corrections =
+                sound_keys::correct(game_root, &sounds, &result.sound_packages, &played);
             compiled_links
                 .insert(Arc::new(CompiledLinks {
                     links: result.links,
                     issues: result.issues,
+                    patterns: result.patterns,
                     corrections,
                 }))
                 .clone()
@@ -212,39 +282,376 @@ pub fn load_verified_subtitles(
             }
         };
 
-        let source = format!("{}: {}", link.source_package, link.source_object);
-        let subtitles = analysis.by_segment.entry(segment.id.clone()).or_default();
-        if let Some(existing) = subtitles.iter_mut().find(|subtitle| {
-            subtitle.cue.eq_ignore_ascii_case(&link.cue)
-                && subtitle.sound_event.eq_ignore_ascii_case(&link.sound_event)
-                && subtitle.sound_map_key == key
-        }) {
-            if !existing.sources.contains(&source) {
-                existing.sources.push(source);
-            }
-        } else {
-            subtitles.push(Subtitle {
+        add_subtitle(
+            &mut analysis,
+            &segment.id,
+            Subtitle {
                 cue: link.cue.clone(),
                 text,
-                sources: vec![source],
+                sources: vec![format!("{}: {}", link.source_package, link.source_object)],
                 sound_event: link.sound_event.clone(),
                 sound_map_key: key,
                 confidence: MappingConfidence::ExplicitCompiledReference,
-            });
-        }
+            },
+        );
         analysis.mapped_pairs += 1;
     }
 
+    match localization_sections(&localization_root, extension) {
+        Ok(sections) => {
+            for pattern in &bridge.patterns {
+                match_unshown_subtitles(
+                    &mut analysis,
+                    pattern,
+                    &sections,
+                    &bridge.corrections,
+                    &map_records,
+                    banks,
+                );
+            }
+        }
+        Err(warning) => push_warning(&mut analysis.warnings, warning),
+    }
+
     for subtitles in analysis.by_segment.values_mut() {
+        // Subtitles the game shows come first.
         subtitles.sort_by(|left, right| {
-            left.cue
-                .to_ascii_lowercase()
-                .cmp(&right.cue.to_ascii_lowercase())
+            (left.confidence != MappingConfidence::ExplicitCompiledReference)
+                .cmp(&(right.confidence != MappingConfidence::ExplicitCompiledReference))
+                .then_with(|| {
+                    left.cue
+                        .to_ascii_lowercase()
+                        .cmp(&right.cue.to_ascii_lowercase())
+                })
                 .then_with(|| left.sound_event.cmp(&right.sound_event))
         });
     }
     analysis.warnings.sort();
     Ok(analysis)
+}
+
+/// Adds a subtitle to a segment, merging its sources into an identical one.
+fn add_subtitle(analysis: &mut SubtitleAnalysis, segment_id: &str, subtitle: Subtitle) {
+    let subtitles = analysis
+        .by_segment
+        .entry(segment_id.to_owned())
+        .or_default();
+    if let Some(existing) = subtitles.iter_mut().find(|existing| {
+        existing.cue.eq_ignore_ascii_case(&subtitle.cue)
+            && existing.text == subtitle.text
+            && existing
+                .sound_event
+                .eq_ignore_ascii_case(&subtitle.sound_event)
+            && existing.sound_map_key == subtitle.sound_map_key
+            && existing.confidence == subtitle.confidence
+    }) {
+        for source in subtitle.sources {
+            if !existing.sources.contains(&source) {
+                existing.sources.push(source);
+            }
+        }
+    } else {
+        subtitles.push(subtitle);
+    }
+}
+
+/// Matches the sounds a pattern plays without a subtitle to the lines of the
+/// localization section named after the pattern, by position.
+///
+/// A pattern's lines of dialogue and its section's spoken lines are in the
+/// same order. Other lines, such as `Note_` and `Goal_` text shown on screen,
+/// aren't voiced and are skipped. The match is only made when they line up
+/// exactly: the counts agree, and every sound passed with a `Localize` cue sits
+/// at that cue's line.
+fn match_unshown_subtitles(
+    analysis: &mut SubtitleAnalysis,
+    pattern: &BridgePattern,
+    sections: &HashMap<String, Vec<(String, String)>>,
+    corrections: &KeyCorrections,
+    map_records: &HashMap<u32, HashSet<MapRecord>>,
+    banks: &[super::Bank],
+) {
+    let Some(lines) = sections.get(&pattern.pattern.to_ascii_lowercase()) else {
+        return;
+    };
+    let lines = lines
+        .iter()
+        .filter(|(key, _)| key.to_ascii_lowercase().starts_with("speech_"))
+        .collect::<Vec<_>>();
+    let calls = pattern
+        .calls
+        .iter()
+        .filter(|call| call.is_dialogue())
+        .collect::<Vec<_>>();
+    // Only scenes that speak lines without a subtitle are of interest.
+    if lines.is_empty() || calls.iter().all(|call| call.cue.is_some()) {
+        return;
+    }
+    let key_of = |call: &BridgeCall| corrections.key(&call.sound_event).or(call.sound_map_key);
+
+    let alignment = if lines.len() == calls.len() {
+        let alignment = (0..calls.len()).collect::<Vec<_>>();
+        if !is_anchored(&pattern.pattern, &calls, &lines, &alignment) {
+            push_warning(
+                &mut analysis.warnings,
+                format!(
+                    "{}'s subtitled sounds don't line up with its localization section, so its unshown subtitles weren't matched.",
+                    pattern.pattern
+                ),
+            );
+            return;
+        }
+        alignment
+    } else if lines.len() > calls.len() {
+        let durations = calls
+            .iter()
+            .map(|call| key_of(call).and_then(|key| clip_seconds(key, map_records)))
+            .collect::<Vec<_>>();
+        match skipping_alignment(&pattern.pattern, &calls, &lines, &durations) {
+            Some(alignment) => alignment,
+            None => {
+                push_warning(
+                    &mut analysis.warnings,
+                    format!(
+                        "{} speaks {} lines but its localization section has {}, and their lengths don't show which lines it skips, so its unshown subtitles weren't matched.",
+                        pattern.pattern,
+                        calls.len(),
+                        lines.len()
+                    ),
+                );
+                return;
+            }
+        }
+    } else {
+        push_warning(
+            &mut analysis.warnings,
+            format!(
+                "{} speaks {} lines but its localization section has only {}, so its unshown subtitles weren't matched.",
+                pattern.pattern,
+                calls.len(),
+                lines.len()
+            ),
+        );
+        return;
+    };
+
+    for (call, &line) in calls.iter().zip(&alignment) {
+        let (cue, text) = lines[line];
+        if call.cue.is_some() || text.is_empty() {
+            continue;
+        }
+        let Some(key) = key_of(call) else {
+            continue;
+        };
+        let segment = match resolve_segment(&call.sound_event, key, map_records, banks) {
+            Ok(segment) => segment,
+            Err(warning) => {
+                push_warning(&mut analysis.warnings, warning);
+                continue;
+            }
+        };
+        add_subtitle(
+            analysis,
+            &segment.id,
+            Subtitle {
+                cue: cue.clone(),
+                text: text.clone(),
+                sources: vec![format!(
+                    "{}: {}",
+                    pattern.source_package, call.source_object
+                )],
+                sound_event: call.sound_event.clone(),
+                sound_map_key: key,
+                confidence: MappingConfidence::SectionOrder,
+            },
+        );
+        analysis.unshown_pairs += 1;
+    }
+}
+
+/// Whether every call with a `Localize` cue sits at that cue's line, where
+/// `alignment` gives each call's line.
+fn is_anchored(
+    pattern: &str,
+    calls: &[&BridgeCall],
+    lines: &[&(String, String)],
+    alignment: &[usize],
+) -> bool {
+    calls
+        .iter()
+        .zip(alignment)
+        .all(|(call, &line)| match (&call.section, &call.cue) {
+            (Some(section), Some(cue)) => {
+                section.eq_ignore_ascii_case(pattern) && cue.eq_ignore_ascii_case(&lines[line].0)
+            }
+            _ => true,
+        })
+}
+
+/// The most ways of skipping a section's extra lines that are compared.
+const MAX_SKIP_ALIGNMENTS: usize = 200;
+
+/// When a section has lines its scene never speaks, finds which ones to skip.
+///
+/// Each way of skipping the extra lines is scored by how much the speaking
+/// rate (characters per second of clip) varies across the lines it keeps. The
+/// most even alignment is used only when it clearly beats every other.
+fn skipping_alignment(
+    pattern: &str,
+    calls: &[&BridgeCall],
+    lines: &[&(String, String)],
+    durations: &[Option<f64>],
+) -> Option<Vec<usize>> {
+    let mut scored = Vec::new();
+    for skipped in combinations(lines.len(), lines.len() - calls.len(), MAX_SKIP_ALIGNMENTS)? {
+        let alignment = (0..lines.len())
+            .filter(|line| !skipped.contains(line))
+            .collect::<Vec<_>>();
+        if !is_anchored(pattern, calls, lines, &alignment) {
+            continue;
+        }
+        let log_rates = alignment
+            .iter()
+            .zip(durations)
+            .filter_map(|(&line, duration)| {
+                Some((spoken_length(&lines[line].1) as f64 / (*duration)?).ln())
+            })
+            .collect::<Vec<_>>();
+        if log_rates.len() < 2 {
+            continue;
+        }
+        let mean = log_rates.iter().sum::<f64>() / log_rates.len() as f64;
+        let spread = log_rates
+            .iter()
+            .map(|rate| (rate - mean).powi(2))
+            .sum::<f64>();
+        scored.push((spread, alignment));
+    }
+    scored.sort_by(|left, right| left.0.total_cmp(&right.0));
+    match scored.as_slice() {
+        [(_, best)] => Some(best.clone()),
+        [(best, alignment), (second, _), ..] => (best * 2.0 < *second).then(|| alignment.clone()),
+        [] => None,
+    }
+}
+
+/// Every way of choosing `count` of `0..total`, or `None` if there are more
+/// than `limit`.
+fn combinations(total: usize, count: usize, limit: usize) -> Option<Vec<Vec<usize>>> {
+    let mut size = 1usize;
+    for index in 0..count {
+        size = size.checked_mul(total - index)? / (index + 1);
+        if size > limit {
+            return None;
+        }
+    }
+    let mut all = Vec::with_capacity(size);
+    let mut current = (0..count).collect::<Vec<_>>();
+    loop {
+        all.push(current.clone());
+        let Some(position) = (0..count)
+            .rev()
+            .find(|&position| current[position] < total - count + position)
+        else {
+            return Some(all);
+        };
+        current[position] += 1;
+        for next in position + 1..count {
+            current[next] = current[next - 1] + 1;
+        }
+    }
+}
+
+/// Counts the characters spoken in a line, leaving out a leading speaker name
+/// such as `SOLDIER A - ` and stage directions in parentheses.
+fn spoken_length(text: &str) -> usize {
+    let text = match text.split_once(" - ") {
+        Some((speaker, rest))
+            if !speaker.trim().is_empty()
+                && speaker.trim().chars().all(|character| {
+                    character.is_ascii_uppercase() || character.is_ascii_digit() || character == ' '
+                }) =>
+        {
+            rest
+        }
+        _ => text,
+    };
+    let mut depth = 0usize;
+    text.chars()
+        .filter(|&character| {
+            match character {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => return depth == 0 && !character.is_whitespace(),
+            }
+            false
+        })
+        .count()
+}
+
+/// The duration of the clip a key's map record describes.
+fn clip_seconds(key: u32, map_records: &HashMap<u32, HashSet<MapRecord>>) -> Option<f64> {
+    let record = map_records.get(&key)?.iter().next()?;
+    let rate = if record.sample_rate == 0 {
+        36000
+    } else {
+        record.sample_rate
+    };
+    Some(f64::from(record.sample_count) / f64::from(rate))
+}
+
+/// Reads every section of the localization files with `extension`, keeping
+/// each section's lines in file order. Cue names can repeat within a section.
+fn localization_sections(
+    localization_root: &Path,
+    extension: &str,
+) -> Result<HashMap<String, Vec<(String, String)>>, String> {
+    let entries = fs::read_dir(localization_root).map_err(|error| {
+        format!(
+            "Could not read directory {}: {error}",
+            localization_root.display()
+        )
+    })?;
+    let mut sections = HashMap::<String, Vec<(String, String)>>::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let (text, _, _) = WINDOWS_1252.decode(&bytes);
+        parse_sections(&text, &mut sections);
+    }
+    Ok(sections)
+}
+
+fn parse_sections(text: &str, sections: &mut HashMap<String, Vec<(String, String)>>) {
+    let mut current: Option<String> = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            let name = name.trim().to_ascii_lowercase();
+            // A section that appears in several files keeps its first copy.
+            current = (!sections.contains_key(&name)).then(|| {
+                sections.insert(name.clone(), Vec::new());
+                name
+            });
+            continue;
+        }
+        if let (Some(section), Some((key, value))) = (&current, line.split_once('=')) {
+            sections
+                .get_mut(section)
+                .expect("current section was inserted")
+                .push((key.trim().to_owned(), value.trim().to_owned()));
+        }
+    }
 }
 
 fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
@@ -340,9 +747,17 @@ pub(crate) fn parse_map_records(data: &[u8]) -> HashMap<u32, HashSet<MapRecord>>
             compressed_bytes,
             sample_count,
             sample_rate: read_u32(data, position + 68).unwrap_or(0),
+            bank: read_bank_name(data, position + 80),
         });
     }
     records
+}
+
+/// Reads a record's null-terminated bank file name, which is at most 32 bytes.
+fn read_bank_name(data: &[u8], position: usize) -> Option<String> {
+    let field = data.get(position..position.checked_add(32)?)?;
+    let name = &field[..field.iter().position(|byte| *byte == 0)?];
+    (!name.is_empty() && name.is_ascii()).then(|| String::from_utf8_lossy(name).into_owned())
 }
 
 fn read_u32(data: &[u8], position: usize) -> Option<u32> {
@@ -365,10 +780,12 @@ fn resolve_segment<'a>(
     let expected_code = sound_package_bank_code(sound_event);
     let mut matches = Vec::new();
     for record in records {
-        for bank in banks.iter().filter(|bank| {
-            expected_code
+        // Records name their bank; the package name is only a fallback.
+        for bank in banks.iter().filter(|bank| match &record.bank {
+            Some(name) => bank.name.eq_ignore_ascii_case(name),
+            None => expected_code
                 .as_deref()
-                .is_none_or(|code| bank.code.eq_ignore_ascii_case(code))
+                .is_none_or(|code| bank.code.eq_ignore_ascii_case(code)),
         }) {
             for segment in &bank.segments {
                 if segment.offset == u64::from(record.offset)
@@ -516,6 +933,7 @@ mod tests {
         write_u32(&mut data, 48, 29_967);
         write_u32(&mut data, 52, 15_571);
         write_u32(&mut data, 68, 36_000);
+        data[80..89].copy_from_slice(b"0_0_2.LS0");
 
         let records = parse_map_records(&data);
         assert_eq!(
@@ -525,6 +943,7 @@ mod tests {
                 compressed_bytes: 15_571,
                 sample_count: 29_967,
                 sample_rate: 36_000,
+                bank: Some("0_0_2.LS0".to_owned()),
             }]))
         );
     }
@@ -593,6 +1012,343 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.sound_packages.len(), 1);
+    }
+
+    #[test]
+    fn keeps_section_lines_in_file_order_with_repeated_cues() {
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[Talk]\nSpeech_0020L=First\nSpeech_0001L=Second\nSpeech_0028L=Third\nSpeech_0028L=Fourth\n[Other]\nA=B\n",
+            &mut sections,
+        );
+
+        assert_eq!(
+            sections["talk"],
+            [
+                ("Speech_0020L".to_owned(), "First".to_owned()),
+                ("Speech_0001L".to_owned(), "Second".to_owned()),
+                ("Speech_0028L".to_owned(), "Third".to_owned()),
+                ("Speech_0028L".to_owned(), "Fourth".to_owned()),
+            ]
+        );
+    }
+
+    fn test_bank(offsets: &[u64]) -> Vec<super::super::Bank> {
+        vec![super::super::Bank {
+            name: "1_1_2.LS0".to_owned(),
+            path: "ENGLISH/1_1_2.LS0".to_owned(),
+            code: "1_1_2".to_owned(),
+            size: 0,
+            issue: None,
+            segments: offsets
+                .iter()
+                .enumerate()
+                .map(|(index, &offset)| super::super::Segment {
+                    id: format!("ENGLISH/1_1_2.LS0:{offset}"),
+                    language: "ENGLISH".to_owned(),
+                    bank: "1_1_2.LS0".to_owned(),
+                    code: "1_1_2".to_owned(),
+                    offset,
+                    byte_length: 10,
+                    sample_count: 20,
+                    sample_rate: 36000,
+                    channels: 1,
+                    codec: "Ubisoft ADPCM 4-bit",
+                    segment: index,
+                })
+                .collect(),
+        }]
+    }
+
+    fn test_records(keys_and_offsets: &[(u32, u32)]) -> HashMap<u32, HashSet<MapRecord>> {
+        keys_and_offsets
+            .iter()
+            .map(|&(key, offset)| {
+                (
+                    key,
+                    HashSet::from([MapRecord {
+                        offset,
+                        compressed_bytes: 10,
+                        sample_count: 20,
+                        sample_rate: 36000,
+                        bank: None,
+                    }]),
+                )
+            })
+            .collect()
+    }
+
+    fn test_call(sound_event: &str, key: u32, cue: Option<&str>) -> BridgeCall {
+        BridgeCall {
+            source_object: "State'EchelonPattern.P_Talk.Pattern'".to_owned(),
+            sound_event: sound_event.to_owned(),
+            sound_map_key: Some(key),
+            section: cue.map(|_| "P_Talk".to_owned()),
+            cue: cue.map(str::to_owned),
+            function: Some(
+                if cue.is_some() {
+                    "__NFUN_1407__"
+                } else {
+                    "__NFUN_1408__"
+                }
+                .to_owned(),
+            ),
+        }
+    }
+
+    #[test]
+    fn skips_the_unspoken_line_whose_removal_evens_out_the_speaking_rate() {
+        // The scene speaks the last three lines; "What's that?" is never played.
+        let clips = [(1, 0, 2.21), (2, 100, 2.72), (3, 200, 1.54)];
+        let mut banks = test_bank(&[0, 100, 200]);
+        let mut records = HashMap::new();
+        for (index, &(key, offset, seconds)) in clips.iter().enumerate() {
+            let sample_count = (seconds * 36000.0) as u32;
+            banks[0].segments[index].sample_count = sample_count;
+            records.insert(
+                key,
+                HashSet::from([MapRecord {
+                    offset,
+                    compressed_bytes: 10,
+                    sample_count,
+                    sample_rate: 36000,
+                    bank: None,
+                }]),
+            );
+        }
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_B", 2, None),
+                test_call("S1_1_2Voice.Play_C", 3, None),
+            ],
+        };
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0005L=SOLDIER A -  Whats that?\nSpeech_0001L=SOLDIER A -  I thought this was what made the pools drain.\nSpeech_0002L=SOLDIER B -  It is, I think.  Maybe it's malfunctioning.\nSpeech_0003L=SOLDIER A -  It doesn't effect us anyway.\n",
+            &mut sections,
+        );
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            &pattern,
+            &sections,
+            &KeyCorrections::default(),
+            &records,
+            &banks,
+        );
+
+        assert_eq!(analysis.unshown_pairs, 3);
+        assert_eq!(
+            analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0].cue,
+            "Speech_0001L"
+        );
+        assert_eq!(
+            analysis.by_segment["ENGLISH/1_1_2.LS0:200"][0].cue,
+            "Speech_0003L"
+        );
+    }
+
+    #[test]
+    fn counts_only_spoken_characters() {
+        assert_eq!(spoken_length("GSOLD -  (interrupting) We're going."), 11);
+        assert_eq!(spoken_length("Um...Okay."), 10);
+        assert_eq!(spoken_length("CIA Agent - 28469"), 14);
+    }
+
+    #[test]
+    fn lists_every_combination_up_to_a_limit() {
+        assert_eq!(
+            combinations(4, 2, 10).unwrap(),
+            [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]
+        );
+        assert_eq!(combinations(3, 0, 10).unwrap(), [Vec::<usize>::new()]);
+        assert!(combinations(40, 4, 200).is_none());
+    }
+
+    #[test]
+    fn skips_sound_effects_when_aligning_dialogue() {
+        let banks = test_bank(&[0, 100]);
+        let records = test_records(&[(1, 0), (2, 100)]);
+        let effect = BridgeCall {
+            function: Some("__NFUN_264__".to_owned()),
+            ..test_call("DestroyableObjet.Play_ExplosionBridge", 9, None)
+        };
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                effect,
+                test_call("S1_1_2Voice.Play_B", 2, None),
+            ],
+        };
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0001L=What was that?\nSpeech_0002L=We're being attacked.\n",
+            &mut sections,
+        );
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            &pattern,
+            &sections,
+            &KeyCorrections::default(),
+            &records,
+            &banks,
+        );
+
+        assert_eq!(analysis.unshown_pairs, 2);
+        assert_eq!(
+            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0].text,
+            "We're being attacked."
+        );
+    }
+
+    #[test]
+    fn finds_audio_in_the_bank_its_map_record_names() {
+        // Level 1_3_2 plays a sound from level 1_3_3's package.
+        let banks = test_bank(&[0, 100]);
+        let mut records = test_records(&[(7, 100)]);
+        let record = records.remove(&7).unwrap().into_iter().next().unwrap();
+        records.insert(
+            7,
+            HashSet::from([MapRecord {
+                bank: Some("1_1_2.LS0".to_owned()),
+                ..record
+            }]),
+        );
+
+        let segment = resolve_segment("S1_3_3Voice.Play_13_21_01", 7, &records, &banks).unwrap();
+
+        assert_eq!(segment.id, "ENGLISH/1_1_2.LS0:100");
+    }
+
+    #[test]
+    fn matches_unshown_sounds_to_section_lines_by_position() {
+        let banks = test_bank(&[0, 100, 200]);
+        let records = test_records(&[(1, 0), (2, 100), (3, 200)]);
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_B", 2, Some("Speech_0005L")),
+                test_call("S1_1_2Voice.Play_C", 3, None),
+            ],
+        };
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0009L=Hello.\nSpeech_0005L=Shown.\nSpeech_0001L=Goodbye.\n",
+            &mut sections,
+        );
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            &pattern,
+            &sections,
+            &KeyCorrections::default(),
+            &records,
+            &banks,
+        );
+
+        assert_eq!(analysis.unshown_pairs, 2);
+        let first = &analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0];
+        assert_eq!(
+            (first.cue.as_str(), first.text.as_str()),
+            ("Speech_0009L", "Hello.")
+        );
+        assert_eq!(first.confidence, MappingConfidence::SectionOrder);
+        assert_eq!(
+            analysis.by_segment["ENGLISH/1_1_2.LS0:200"][0].text,
+            "Goodbye."
+        );
+        // The sound passed with its cue is matched explicitly elsewhere.
+        assert!(!analysis.by_segment.contains_key("ENGLISH/1_1_2.LS0:100"));
+    }
+
+    #[test]
+    fn skips_section_lines_that_arent_spoken() {
+        let banks = test_bank(&[0, 100]);
+        let records = test_records(&[(1, 0), (2, 100)]);
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_B", 2, None),
+            ],
+        };
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0001L=What's the code?\nNote_0002L=The code is 28469.\nSpeech_0003L=28469.\n",
+            &mut sections,
+        );
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            &pattern,
+            &sections,
+            &KeyCorrections::default(),
+            &records,
+            &banks,
+        );
+
+        assert_eq!(analysis.unshown_pairs, 2);
+        assert_eq!(
+            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0].text,
+            "28469."
+        );
+    }
+
+    #[test]
+    fn skips_patterns_whose_lines_dont_line_up() {
+        let banks = test_bank(&[0, 100]);
+        let records = test_records(&[(1, 0), (2, 100)]);
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0001L=One.\nSpeech_0002L=Two.\nSpeech_0003L=Six.\n",
+            &mut sections,
+        );
+        let fewer_sounds = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_B", 2, None),
+            ],
+        };
+        let misplaced_cue = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, Some("Speech_0002L")),
+                test_call("S1_1_2Voice.Play_B", 2, None),
+                test_call("S1_1_2Voice.Play_C", 2, None),
+            ],
+        };
+        let mut analysis = SubtitleAnalysis::default();
+
+        for pattern in [&fewer_sounds, &misplaced_cue] {
+            match_unshown_subtitles(
+                &mut analysis,
+                pattern,
+                &sections,
+                &KeyCorrections::default(),
+                &records,
+                &banks,
+            );
+        }
+
+        assert_eq!(analysis.unshown_pairs, 0);
+        assert!(analysis.by_segment.is_empty());
+        assert_eq!(analysis.warnings.len(), 2);
     }
 
     #[test]

@@ -67,17 +67,73 @@ fn decodes_every_discovered_game_segment() {
         if language.directory.eq_ignore_ascii_case("ENGLISH") {
             // These packages store scrambled sound keys; the segments were
             // confirmed by listening.
-            for (segment_id, cue) in [
-                ("ENGLISH/0_0_2.LS0:449196", "Speech_0012L"),
-                ("ENGLISH/0_0_2.LS0:564212", "Speech_0018L"),
-                ("ENGLISH/2_1_2.LS0:1812880", "Speech_0082L"),
+            // The last two are spoken face to face, so the game doesn't show
+            // them; their text comes from the pattern's localization section.
+            for (segment_id, cue, confidence) in [
+                (
+                    "ENGLISH/0_0_2.LS0:449196",
+                    "Speech_0012L",
+                    MappingConfidence::ExplicitCompiledReference,
+                ),
+                (
+                    "ENGLISH/0_0_2.LS0:564212",
+                    "Speech_0018L",
+                    MappingConfidence::ExplicitCompiledReference,
+                ),
+                (
+                    "ENGLISH/2_1_2.LS0:1812880",
+                    "Speech_0082L",
+                    MappingConfidence::ExplicitCompiledReference,
+                ),
+                (
+                    "ENGLISH/1_3_2.LS0:126924",
+                    "Speech_0003L",
+                    MappingConfidence::ExplicitCompiledReference,
+                ),
+                (
+                    "ENGLISH/1_1_2.LS0:795812",
+                    "Speech_0022L",
+                    MappingConfidence::SectionOrder,
+                ),
+                (
+                    "ENGLISH/1_1_2.LS0:1971596",
+                    "Speech_0001L",
+                    MappingConfidence::SectionOrder,
+                ),
+                (
+                    "ENGLISH/0_0_3.LS0:10376",
+                    "Speech_0009L",
+                    MappingConfidence::SectionOrder,
+                ),
+                (
+                    "ENGLISH/0_0.LS0:0",
+                    "Speech_0007L",
+                    MappingConfidence::SectionOrder,
+                ),
+                (
+                    "ENGLISH/1_1_1.LS0:2316460",
+                    "Speech_0001L",
+                    MappingConfidence::SectionOrder,
+                ),
+                (
+                    "ENGLISH/1_3_3.LS0:0",
+                    "Speech_0011L",
+                    MappingConfidence::SectionOrder,
+                ),
+                (
+                    "ENGLISH/4_2_1.LS0:0",
+                    "Speech_0001L",
+                    MappingConfidence::SectionOrder,
+                ),
             ] {
                 assert!(
                     subtitles
                         .by_segment
                         .get(segment_id)
-                        .is_some_and(|found| found.iter().any(|subtitle| subtitle.cue == cue)),
-                    "{segment_id}: expected subtitle {cue}"
+                        .is_some_and(|found| found.iter().any(
+                            |subtitle| subtitle.cue == cue && subtitle.confidence == confidence
+                        )),
+                    "{segment_id}: expected {confidence:?} subtitle {cue}"
                 );
             }
         }
@@ -91,14 +147,6 @@ fn decodes_every_discovered_game_segment() {
                 segment_id
             );
             for subtitle in possible_subtitles {
-                assert!(
-                    matches!(
-                        subtitle.confidence,
-                        MappingConfidence::ExplicitCompiledReference
-                    ),
-                    "{}: mapping is not based on an explicit compiled reference",
-                    segment_id
-                );
                 assert!(!subtitle.text.trim().is_empty(), "{segment_id}: empty cue");
             }
         }
@@ -150,10 +198,11 @@ fn decodes_every_discovered_game_segment() {
         }
 
         println!(
-            "{}: decoded {language_segments} segments from {language_banks} banks; mapped {}/{} explicit subtitle/audio references across {} segments with {} warnings",
+            "{}: decoded {language_segments} segments from {language_banks} banks; mapped {}/{} explicit subtitle/audio references and {} unshown subtitles across {} segments with {} warnings",
             language.label,
             subtitles.mapped_pairs,
             subtitles.explicit_pairs,
+            subtitles.unshown_pairs,
             subtitles.by_segment.len(),
             subtitles.warnings.len()
         );

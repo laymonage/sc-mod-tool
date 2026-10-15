@@ -1,6 +1,11 @@
 use eframe::egui::{self, Align, Align2, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
-use sc_mod_tool_core::{Bank, Segment, subtitles::Subtitle};
+use sc_mod_tool_core::{
+    Bank, Segment,
+    subtitles::{MappingConfidence, Subtitle},
+};
+
+const NOT_SHOWN_IN_GAME: &str = "Not shown in game";
 
 use super::SCModToolApp;
 
@@ -393,7 +398,17 @@ impl SCModToolApp {
                             if subtitles.len() > 1 {
                                 text.push_str(&format!("  (+{} more)", subtitles.len() - 1));
                             }
-                            ui.add(egui::Label::new(text).truncate());
+                            // Subtitles the game shows are sorted first, so
+                            // this means none of them are shown.
+                            if is_shown_in_game(&subtitles[0]) {
+                                ui.add(egui::Label::new(text).truncate());
+                            } else {
+                                ui.add(
+                                    egui::Label::new(RichText::new(text).italics().weak())
+                                        .truncate(),
+                                )
+                                .on_hover_text(NOT_SHOWN_IN_GAME);
+                            }
                         }
                         None => {
                             ui.label(RichText::new("—").weak());
@@ -614,6 +629,10 @@ fn bank_row(ui: &mut egui::Ui, bank: &Bank, selected: bool) -> egui::Response {
     }
 }
 
+fn is_shown_in_game(subtitle: &Subtitle) -> bool {
+    subtitle.confidence == MappingConfidence::ExplicitCompiledReference
+}
+
 fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -624,7 +643,13 @@ fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
         );
-        ui.label(RichText::new(&subtitle.cue).small().weak());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&subtitle.cue).small().weak());
+            if !is_shown_in_game(subtitle) {
+                ui.label(RichText::new(NOT_SHOWN_IN_GAME).small().italics().weak())
+                    .on_hover_text("The game plays this line without a subtitle. Its text is the line at the same position in the scene's localization section.");
+            }
+        });
         egui::CollapsingHeader::new(RichText::new("Where it comes from").small())
             .id_salt(("subtitle-source", position))
             .show(ui, |ui| {

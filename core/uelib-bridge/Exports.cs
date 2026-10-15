@@ -45,6 +45,7 @@ public static unsafe class Exports
 
         var issues = new List<string>();
         var sourcePairs = new HashSet<SourcePair>();
+        var patterns = new Dictionary<string, PatternCalls>(StringComparer.Ordinal);
         foreach (var packagePath in FindScriptPackages(systemRoot))
         {
             try
@@ -62,6 +63,16 @@ public static unsafe class Exports
                     {
                         scriptObject.BeginDeserializing();
                         var script = scriptObject.Decompile();
+                        if (OwningClassName(scriptObject) is { } className)
+                        {
+                            if (!patterns.TryGetValue(className, out var pattern))
+                            {
+                                pattern = new PatternCalls(className, Path.GetFileName(packagePath), []);
+                                patterns.Add(className, pattern);
+                            }
+                            pattern.Calls.AddRange(DirectPairs.FindSoundCalls(script)
+                                .Select(call => new PatternCall(sourceObject, call)));
+                        }
                         foreach (var pair in DirectPairs.Find(script))
                         {
                             sourcePairs.Add(new SourcePair(
@@ -86,29 +97,41 @@ public static unsafe class Exports
             }
         }
 
-        var soundPackages = new Dictionary<string, SoundPackage>(StringComparer.OrdinalIgnoreCase);
-        var links = new List<BridgeLink>();
-        foreach (var pair in sourcePairs)
+        var soundPackages = new Dictionary<string, SoundPackage?>(StringComparer.OrdinalIgnoreCase);
+        SoundPackage? LoadSoundPackage(string name, string soundEvent)
         {
-            if (!soundPackages.TryGetValue(pair.SoundPackage, out var soundPackage))
+            if (soundPackages.TryGetValue(name, out var loaded))
             {
-                var path = FindPackagePath(soundsRoot, pair.SoundPackage + ".uax");
-                if (path is null)
-                {
-                    issues.Add($"Sound package was not found for {pair.SoundPackage}.{pair.SoundEvent}.");
-                    continue;
-                }
+                return loaded;
+            }
 
+            SoundPackage? soundPackage = null;
+            var path = FindPackagePath(soundsRoot, name + ".uax");
+            if (path is null)
+            {
+                issues.Add($"Sound package was not found for {name}.{soundEvent}.");
+            }
+            else
+            {
                 try
                 {
                     soundPackage = ReadSoundPackage(path);
-                    soundPackages.Add(pair.SoundPackage, soundPackage);
                 }
                 catch (Exception error)
                 {
                     issues.Add($"Could not load sound package {path}: {error.Message}");
-                    continue;
                 }
+            }
+            soundPackages.Add(name, soundPackage);
+            return soundPackage;
+        }
+
+        var links = new List<BridgeLink>();
+        foreach (var pair in sourcePairs)
+        {
+            if (LoadSoundPackage(pair.SoundPackage, pair.SoundEvent) is not { } soundPackage)
+            {
+                continue;
             }
 
             if (!soundPackage.Sounds.TryGetValue(pair.SoundEvent, out var sound))
@@ -145,7 +168,33 @@ public static unsafe class Exports
                 ? byCue
                 : string.Compare(left.SoundEvent, right.SoundEvent, StringComparison.OrdinalIgnoreCase);
         });
-        return new BridgeResult(links, issues, soundPackages.Values.ToArray());
+        // Patterns whose sounds play without a subtitle; core matches them to
+        // the lines of the pattern's localization section by position.
+        var patternResults = new List<PatternResult>();
+        foreach (var pattern in patterns.Values.Where(pattern => pattern.Calls.Any(call => call.Call.Pair is null)))
+        {
+            var calls = pattern.Calls.Select(call =>
+            {
+                var sound = LoadSoundPackage(call.Call.SoundPackage, call.Call.SoundEvent) is { } soundPackage
+                    && soundPackage.Sounds.TryGetValue(call.Call.SoundEvent, out var entry)
+                        ? entry.Key
+                        : null;
+                return new PatternCallResult(
+                    call.SourceObject,
+                    call.Call.SoundPackage + "." + call.Call.SoundEvent,
+                    sound,
+                    call.Call.Pair?.Section,
+                    call.Call.Pair?.Cue,
+                    call.Call.Function);
+            });
+            patternResults.Add(new PatternResult(pattern.ClassName, pattern.SourcePackage, calls.ToArray()));
+        }
+
+        return new BridgeResult(
+            links,
+            issues,
+            soundPackages.Values.OfType<SoundPackage>().ToArray(),
+            patternResults);
     }
 
     private static IEnumerable<string> FindScriptPackages(string systemRoot)
@@ -185,6 +234,18 @@ public static unsafe class Exports
         var separator = Math.Max(localizationPath.LastIndexOf('/'), localizationPath.LastIndexOf('\\'));
         var baseName = localizationPath[(separator + 1)..];
         return Path.GetFileNameWithoutExtension(baseName);
+    }
+
+    private static string? OwningClassName(UObject item)
+    {
+        for (var outer = item.Outer; outer is not null; outer = outer.Outer)
+        {
+            if (outer is UClass)
+            {
+                return outer.Name;
+            }
+        }
+        return null;
     }
 
     /// <summary>Reads every sound in a package, keeping each one's export position.</summary>
@@ -249,6 +310,39 @@ public static unsafe class Exports
             foreach (var issue in result.Issues)
             {
                 writer.WriteStringValue(issue);
+            }
+            writer.WriteEndArray();
+            writer.WritePropertyName("patterns");
+            writer.WriteStartArray();
+            foreach (var pattern in result.Patterns)
+            {
+                writer.WriteStartObject();
+                writer.WriteString("pattern", pattern.ClassName);
+                writer.WriteString("sourcePackage", pattern.SourcePackage);
+                writer.WritePropertyName("calls");
+                writer.WriteStartArray();
+                foreach (var call in pattern.Calls)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("sourceObject", call.SourceObject);
+                    writer.WriteString("soundEvent", call.SoundEvent);
+                    if (call.SoundMapKey is { } key)
+                    {
+                        writer.WriteNumber("soundMapKey", key);
+                    }
+                    if (call.Section is not null && call.Cue is not null)
+                    {
+                        writer.WriteString("section", call.Section);
+                        writer.WriteString("cue", call.Cue);
+                    }
+                    if (call.Function is not null)
+                    {
+                        writer.WriteString("function", call.Function);
+                    }
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+                writer.WriteEndObject();
             }
             writer.WriteEndArray();
             writer.WritePropertyName("soundPackages");
@@ -334,7 +428,22 @@ public static unsafe class Exports
     private sealed record BridgeResult(
         IReadOnlyList<BridgeLink> Links,
         IReadOnlyList<string> Issues,
-        IReadOnlyList<SoundPackage> SoundPackages);
+        IReadOnlyList<SoundPackage> SoundPackages,
+        IReadOnlyList<PatternResult> Patterns);
+
+    private sealed record PatternCalls(string ClassName, string SourcePackage, List<PatternCall> Calls);
+
+    private sealed record PatternCall(string SourceObject, SoundCall Call);
+
+    private sealed record PatternResult(string ClassName, string SourcePackage, IReadOnlyList<PatternCallResult> Calls);
+
+    private sealed record PatternCallResult(
+        string SourceObject,
+        string SoundEvent,
+        uint? SoundMapKey,
+        string? Section,
+        string? Cue,
+        string? Function);
 
     private sealed record SoundPackage(string Name, string Path, IReadOnlyDictionary<string, SoundEntry> Sounds);
 
