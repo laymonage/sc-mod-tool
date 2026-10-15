@@ -64,6 +64,21 @@ fn decodes_every_discovered_game_segment() {
                 language.label
             );
         }
+        if language.directory.eq_ignore_ascii_case("GERMAN") {
+            // German keeps leftover lines in this scene's section, so it's
+            // aligned against English and its text looked up by cue name.
+            let segment_id = "GERMAN/2_1_2.LS0:3932084";
+            assert!(
+                subtitles
+                    .by_segment
+                    .get(segment_id)
+                    .is_some_and(|found| found
+                        .iter()
+                        .any(|subtitle| subtitle.cue == "Speech_0016L"
+                            && subtitle.text.contains("Dein Freund?"))),
+                "{segment_id}: expected German subtitle Speech_0016L"
+            );
+        }
         if language.directory.eq_ignore_ascii_case("ENGLISH") {
             // These packages store scrambled sound keys; the segments were
             // confirmed by listening.

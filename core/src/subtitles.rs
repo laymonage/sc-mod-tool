@@ -299,11 +299,18 @@ pub fn load_verified_subtitles(
 
     match localization_sections(&localization_root, extension) {
         Ok(sections) => {
+            // Scenes are aligned against English, the language they were written in.
+            let english = if extension == "int" {
+                None
+            } else {
+                localization_sections(&localization_root, "int").ok()
+            };
             for pattern in &bridge.patterns {
                 match_unshown_subtitles(
                     &mut analysis,
                     pattern,
                     &sections,
+                    english.as_ref().unwrap_or(&sections),
                     &bridge.corrections,
                     &map_records,
                     banks,
@@ -360,24 +367,22 @@ fn add_subtitle(analysis: &mut SubtitleAnalysis, segment_id: &str, subtitle: Sub
 ///
 /// A pattern's lines of dialogue and its section's spoken lines are in the
 /// same order. Other lines, such as `Note_` and `Goal_` text shown on screen,
-/// aren't voiced and are skipped. The match is only made when they line up
-/// exactly: the counts agree, and every sound passed with a `Localize` cue sits
-/// at that cue's line.
+/// aren't voiced and are skipped. The alignment is made against the English
+/// section (`reference_sections`), and each line's text is then looked up in
+/// this language by cue name: other languages' sections can keep lines that
+/// English dropped, which would throw positions off. If English doesn't line
+/// up, this language's section is aligned on its own.
 fn match_unshown_subtitles(
     analysis: &mut SubtitleAnalysis,
     pattern: &BridgePattern,
     sections: &HashMap<String, Vec<(String, String)>>,
+    reference_sections: &HashMap<String, Vec<(String, String)>>,
     corrections: &KeyCorrections,
     map_records: &HashMap<u32, HashSet<MapRecord>>,
     banks: &[super::Bank],
 ) {
-    let Some(lines) = sections.get(&pattern.pattern.to_ascii_lowercase()) else {
-        return;
-    };
-    let lines = lines
-        .iter()
-        .filter(|(key, _)| key.to_ascii_lowercase().starts_with("speech_"))
-        .collect::<Vec<_>>();
+    let lines = spoken_lines(sections, &pattern.pattern);
+    let reference_lines = spoken_lines(reference_sections, &pattern.pattern);
     let calls = pattern
         .calls
         .iter()
@@ -388,55 +393,29 @@ fn match_unshown_subtitles(
         return;
     }
     let key_of = |call: &BridgeCall| corrections.key(&call.sound_event).or(call.sound_map_key);
+    let durations = calls
+        .iter()
+        .map(|call| key_of(call).and_then(|key| clip_seconds(key, map_records)))
+        .collect::<Vec<_>>();
 
-    let alignment = if lines.len() == calls.len() {
-        let alignment = (0..calls.len()).collect::<Vec<_>>();
-        if !is_anchored(&pattern.pattern, &calls, &lines, &alignment) {
-            push_warning(
-                &mut analysis.warnings,
-                format!(
-                    "{}'s subtitled sounds don't line up with its localization section, so its unshown subtitles weren't matched.",
-                    pattern.pattern
-                ),
-            );
-            return;
-        }
-        alignment
-    } else if lines.len() > calls.len() {
-        let durations = calls
+    let matched = match align(&pattern.pattern, &calls, &reference_lines, &durations) {
+        Ok(alignment) => alignment
             .iter()
-            .map(|call| key_of(call).and_then(|key| clip_seconds(key, map_records)))
-            .collect::<Vec<_>>();
-        match skipping_alignment(&pattern.pattern, &calls, &lines, &durations) {
-            Some(alignment) => alignment,
-            None => {
-                push_warning(
-                    &mut analysis.warnings,
-                    format!(
-                        "{} speaks {} lines but its localization section has {}, and their lengths don't show which lines it skips, so its unshown subtitles weren't matched.",
-                        pattern.pattern,
-                        calls.len(),
-                        lines.len()
-                    ),
-                );
+            .map(|&line| cue_in_language(&reference_lines, line, &lines))
+            .collect::<Vec<_>>(),
+        Err(_) => match align(&pattern.pattern, &calls, &lines, &durations) {
+            Ok(alignment) => alignment.iter().map(|&line| Some(lines[line])).collect(),
+            Err(warning) => {
+                push_warning(&mut analysis.warnings, warning);
                 return;
             }
-        }
-    } else {
-        push_warning(
-            &mut analysis.warnings,
-            format!(
-                "{} speaks {} lines but its localization section has only {}, so its unshown subtitles weren't matched.",
-                pattern.pattern,
-                calls.len(),
-                lines.len()
-            ),
-        );
-        return;
+        },
     };
 
-    for (call, &line) in calls.iter().zip(&alignment) {
-        let (cue, text) = lines[line];
+    for (call, line) in calls.iter().zip(matched) {
+        let Some((cue, text)) = line else {
+            continue;
+        };
         if call.cue.is_some() || text.is_empty() {
             continue;
         }
@@ -467,6 +446,81 @@ fn match_unshown_subtitles(
         );
         analysis.unshown_pairs += 1;
     }
+}
+
+/// A section's spoken lines, in file order. `Note_` and `Goal_` lines are text
+/// shown on screen and aren't voiced.
+fn spoken_lines<'a>(
+    sections: &'a HashMap<String, Vec<(String, String)>>,
+    section: &str,
+) -> Vec<&'a (String, String)> {
+    sections
+        .get(&section.to_ascii_lowercase())
+        .map(|lines| {
+            lines
+                .iter()
+                .filter(|(key, _)| key.to_ascii_lowercase().starts_with("speech_"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Lines a scene's dialogue calls up with a section's spoken lines, returning
+/// each call's line, or a warning explaining why they don't line up.
+fn align(
+    pattern: &str,
+    calls: &[&BridgeCall],
+    lines: &[&(String, String)],
+    durations: &[Option<f64>],
+) -> Result<Vec<usize>, String> {
+    if lines.is_empty() {
+        return Err(format!(
+            "{pattern} has no spoken lines in its localization section, so its unshown subtitles weren't matched."
+        ));
+    }
+    if lines.len() == calls.len() {
+        let alignment = (0..calls.len()).collect::<Vec<_>>();
+        return if is_anchored(pattern, calls, lines, &alignment) {
+            Ok(alignment)
+        } else {
+            Err(format!(
+                "{pattern}'s subtitled sounds don't line up with its localization section, so its unshown subtitles weren't matched."
+            ))
+        };
+    }
+    if lines.len() > calls.len() {
+        return skipping_alignment(pattern, calls, lines, durations).ok_or_else(|| {
+            format!(
+                "{pattern} speaks {} lines but its localization section has {}, and their lengths don't show which lines it skips, so its unshown subtitles weren't matched.",
+                calls.len(),
+                lines.len()
+            )
+        });
+    }
+    Err(format!(
+        "{pattern} speaks {} lines but its localization section has only {}, so its unshown subtitles weren't matched.",
+        calls.len(),
+        lines.len()
+    ))
+}
+
+/// Finds the line of `lines` with the same cue as `reference_lines[index]`.
+/// Cue names can repeat within a section, so the same occurrence is used.
+fn cue_in_language<'a>(
+    reference_lines: &[&(String, String)],
+    index: usize,
+    lines: &[&'a (String, String)],
+) -> Option<&'a (String, String)> {
+    let cue = &reference_lines[index].0;
+    let occurrence = reference_lines[..index]
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case(cue))
+        .count();
+    lines
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case(cue))
+        .nth(occurrence)
+        .copied()
 }
 
 /// Whether every call with a `Localize` cue sits at that cue's line, where
@@ -1136,6 +1190,7 @@ mod tests {
             &mut analysis,
             &pattern,
             &sections,
+            &sections,
             &KeyCorrections::default(),
             &records,
             &banks,
@@ -1149,6 +1204,51 @@ mod tests {
         assert_eq!(
             analysis.by_segment["ENGLISH/1_1_2.LS0:200"][0].cue,
             "Speech_0003L"
+        );
+    }
+
+    #[test]
+    fn aligns_against_english_and_ignores_leftover_lines_in_other_languages() {
+        let banks = test_bank(&[0, 100]);
+        let records = test_records(&[(1, 0), (2, 100)]);
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_B", 2, None),
+            ],
+        };
+        let mut english = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0001L=Damn.\nSpeech_0002L=Stop him.\n",
+            &mut english,
+        );
+        let mut german = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0001L=Verdammt.\nSpeech_0002L=Haltet ihn auf.\nSpeech_0015L=Ein alter Entwurf.\n",
+            &mut german,
+        );
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            &pattern,
+            &german,
+            &english,
+            &KeyCorrections::default(),
+            &records,
+            &banks,
+        );
+
+        assert_eq!(analysis.unshown_pairs, 2);
+        assert_eq!(
+            analysis.by_segment["ENGLISH/1_1_2.LS0:0"][0].text,
+            "Verdammt."
+        );
+        assert_eq!(
+            analysis.by_segment["ENGLISH/1_1_2.LS0:100"][0].text,
+            "Haltet ihn auf."
         );
     }
 
@@ -1196,6 +1296,7 @@ mod tests {
         match_unshown_subtitles(
             &mut analysis,
             &pattern,
+            &sections,
             &sections,
             &KeyCorrections::default(),
             &records,
@@ -1252,6 +1353,7 @@ mod tests {
             &mut analysis,
             &pattern,
             &sections,
+            &sections,
             &KeyCorrections::default(),
             &records,
             &banks,
@@ -1294,6 +1396,7 @@ mod tests {
         match_unshown_subtitles(
             &mut analysis,
             &pattern,
+            &sections,
             &sections,
             &KeyCorrections::default(),
             &records,
@@ -1339,6 +1442,7 @@ mod tests {
             match_unshown_subtitles(
                 &mut analysis,
                 pattern,
+                &sections,
                 &sections,
                 &KeyCorrections::default(),
                 &records,
