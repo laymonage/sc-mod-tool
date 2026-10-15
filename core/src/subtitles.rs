@@ -4,6 +4,7 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "uelib-bridge")]
 use std::sync::{Mutex, PoisonError};
 
@@ -183,14 +184,22 @@ struct SoundMap<'a> {
 /// `compiled_links` caches the UELib analysis for the game at `root`. Pass
 /// `None` to run it (it is then filled in), or a value from an earlier call for
 /// the same game root to reuse it.
+///
+/// Stops with [`Error::Cancelled`] once `cancelled` is set. UELib's analysis
+/// can't be interrupted, so cancelling while it runs takes effect when it
+/// finishes. Its result is still kept in `compiled_links`.
 pub fn load_verified_subtitles(
     root: &Path,
     language: &str,
     banks: &[super::Bank],
     compiled_links: &mut Option<Arc<CompiledLinks>>,
+    cancelled: &AtomicBool,
 ) -> Result<SubtitleAnalysis, Error> {
     if language == "." {
         return Ok(SubtitleAnalysis::default());
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
     }
     let extension = super::known_language(language)
         .ok_or_else(|| {
@@ -229,7 +238,7 @@ pub fn load_verified_subtitles(
     let bridge = match compiled_links {
         Some(links) => Arc::clone(links),
         None => {
-            let result = scan_compiled_links(game_root)?;
+            let result = scan_compiled_links(game_root, cancelled)?;
             let played = result
                 .links
                 .iter()
@@ -257,6 +266,9 @@ pub fn load_verified_subtitles(
                 .clone()
         }
     };
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(Error::Cancelled);
+    }
     let mut analysis = SubtitleAnalysis {
         explicit_pairs: bridge.links.len(),
         ..SubtitleAnalysis::default()
@@ -289,6 +301,9 @@ pub fn load_verified_subtitles(
     let localization_root = game_root.join("system").join("LOCALIZATION");
     let mut localization_cache = HashMap::<PathBuf, String>::new();
     for link in &bridge.links {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
         let key = bridge
             .corrections
             .key(&link.sound_event)
@@ -366,6 +381,9 @@ pub fn load_verified_subtitles(
                 localization_sections(&localization_root, "int").ok()
             };
             for pattern in &bridge.patterns {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err(Error::Cancelled);
+                }
                 match_unshown_subtitles(
                     &mut analysis,
                     pattern,
@@ -815,7 +833,7 @@ fn parse_sections(text: &str, sections: &mut HashMap<String, Vec<(String, String
     }
 }
 
-fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
+fn scan_compiled_links(game_root: &Path, cancelled: &AtomicBool) -> Result<BridgeResult, Error> {
     #[cfg(feature = "uelib-bridge")]
     {
         unsafe extern "C" {
@@ -835,6 +853,10 @@ fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
         // analyses would corrupt each other's output. Run one at a time.
         static BRIDGE_LOCK: Mutex<()> = Mutex::new(());
         let _bridge_guard = BRIDGE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        // Another analysis may have held the lock for a long time.
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(Error::Cancelled);
+        }
         let mut output = vec![0u8; BRIDGE_OUTPUT_CAPACITY];
         let status = unsafe {
             scmod_scan_script_audio_links(
@@ -847,7 +869,8 @@ fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
             return Err(format!(
                 "UELib analysis output exceeded the {}-byte bridge buffer.",
                 output.len()
-            ));
+            )
+            .into());
         }
 
         let output_length = output
@@ -861,15 +884,16 @@ fn scan_compiled_links(game_root: &Path) -> Result<BridgeResult, String> {
         if status != 0 {
             return Err(result
                 .error
-                .unwrap_or_else(|| format!("UELib analysis failed with status {status}.")));
+                .unwrap_or_else(|| format!("UELib analysis failed with status {status}."))
+                .into());
         }
         Ok(result)
     }
 
     #[cfg(not(feature = "uelib-bridge"))]
     {
-        let _ = game_root;
-        Err("This build does not include the UELib bridge needed for subtitle matching.".to_owned())
+        let _ = (game_root, cancelled);
+        Err("This build does not include the UELib bridge needed for subtitle matching.".into())
     }
 }
 
@@ -1768,12 +1792,33 @@ mod tests {
             "KLINGON",
             &[],
             &mut compiled_links,
+            &AtomicBool::new(false),
         )
         .unwrap_err();
         assert_eq!(
             error.to_string(),
             "Subtitle localization extension is not known for language KLINGON."
         );
+        assert!(compiled_links.is_none());
+    }
+
+    #[test]
+    fn stops_before_running_uelib_when_cancelled() {
+        let game = tempfile::tempdir().unwrap();
+        let english = game.path().join("Sounds/ENGLISH");
+        fs::create_dir_all(&english).unwrap();
+        fs::write(english.join("MAPS.LM0"), []).unwrap();
+        let mut compiled_links = None;
+
+        let error = load_verified_subtitles(
+            game.path(),
+            "ENGLISH",
+            &[],
+            &mut compiled_links,
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert_eq!(error, Error::Cancelled);
         assert!(compiled_links.is_none());
     }
 
@@ -1785,7 +1830,14 @@ mod tests {
         fs::create_dir_all(&english).unwrap();
         fs::write(english.join("MAPS.LM0"), []).unwrap();
 
-        let error = load_verified_subtitles(game.path(), "ENGLISH", &[], &mut None).unwrap_err();
+        let error = load_verified_subtitles(
+            game.path(),
+            "ENGLISH",
+            &[],
+            &mut None,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         let message = error.to_string();
         assert!(
             message.starts_with("Game system directory was not found: "),

@@ -10,7 +10,7 @@ const NO_TEXT: &str = "No text";
 const NO_TEXT_HINT: &str =
     "This line exists in its scene, but the game's localization files have no text for it.";
 
-use super::{SCModToolApp, TextFilter};
+use super::{SCModToolApp, ScanProgress, TextFilter};
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
 enum Action {
@@ -162,20 +162,34 @@ impl SCModToolApp {
             ui.horizontal(|ui| {
                 if let Some(progress) = &self.scan_progress {
                     ui.spinner();
-                    let fraction = if progress.total == 0 {
-                        0.0
-                    } else {
-                        progress.completed as f32 / progress.total as f32
-                    };
-                    ui.add(
-                        egui::ProgressBar::new(fraction)
-                            .desired_width(180.0)
-                            .text(format!("{} / {} banks", progress.completed, progress.total)),
-                    );
-                    if ui.small_button("Cancel").clicked() {
-                        actions.push(Action::CancelScan);
+                    match progress {
+                        ScanProgress::Banks {
+                            completed,
+                            total,
+                            bank,
+                        } if !self.is_cancelling_scan() => {
+                            let fraction = if *total == 0 {
+                                0.0
+                            } else {
+                                *completed as f32 / *total as f32
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(fraction)
+                                    .desired_width(180.0)
+                                    .text(format!("{completed} / {total} banks")),
+                            );
+                            if ui.small_button("Cancel").clicked() {
+                                actions.push(Action::CancelScan);
+                            }
+                            ui.label(RichText::new(bank).weak());
+                        }
+                        _ => {
+                            ui.label(self.scan_activity());
+                            if !self.is_cancelling_scan() && ui.small_button("Cancel").clicked() {
+                                actions.push(Action::CancelScan);
+                            }
+                        }
                     }
-                    ui.label(RichText::new(&progress.bank).weak());
                 } else if self.status.is_error {
                     ui.label(
                         RichText::new(format!("⚠ {}", self.status.message))
@@ -227,7 +241,7 @@ impl SCModToolApp {
                 ui.add_space(ui.available_height() * 0.35);
                 if self.discovering_languages || self.scan_progress.is_some() {
                     ui.spinner();
-                    ui.label("Scanning sound banks…");
+                    ui.label(self.scan_activity());
                 } else {
                     ui.label(RichText::new("No sound banks to show").heading());
                     ui.label(

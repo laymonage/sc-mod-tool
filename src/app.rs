@@ -24,9 +24,7 @@ enum WorkerMessage {
     },
     ScanProgress {
         request: u64,
-        completed: usize,
-        total: usize,
-        bank: String,
+        progress: ScanProgress,
     },
     Banks {
         request: u64,
@@ -41,10 +39,16 @@ enum WorkerMessage {
     },
 }
 
-struct ScanProgress {
-    completed: usize,
-    total: usize,
-    bank: String,
+enum ScanProgress {
+    /// Reading the language's sound banks.
+    Banks {
+        completed: usize,
+        total: usize,
+        bank: String,
+    },
+    /// Matching the banks' segments to subtitles, after reading the game's
+    /// scripts with UELib unless they were read before.
+    Subtitles { reading_scripts: bool },
 }
 
 /// A segment that is being read and decoded before it plays.
@@ -215,7 +219,7 @@ impl SCModToolApp {
         self.cancel_scan();
         self.stop_playback();
         self.clear_banks();
-        self.scan_progress = Some(ScanProgress {
+        self.scan_progress = Some(ScanProgress::Banks {
             completed: 0,
             total: 0,
             bank: String::new(),
@@ -230,30 +234,40 @@ impl SCModToolApp {
         self.set_status("Scanning sound banks...", false);
 
         thread::spawn(move || {
-            let result = sc_mod_tool_core::discover_banks_with_progress(
+            let send_progress = |progress| {
+                let _ = sender.send(WorkerMessage::ScanProgress { request, progress });
+                repaint.request_repaint();
+            };
+            let mut result = sc_mod_tool_core::discover_banks_with_progress(
                 &root,
                 &language,
                 &cancelled,
                 |completed, total, bank| {
-                    let _ = sender.send(WorkerMessage::ScanProgress {
-                        request,
+                    send_progress(ScanProgress::Banks {
                         completed,
                         total,
                         bank: bank.to_owned(),
                     });
-                    repaint.request_repaint();
                 },
             );
             let subtitles = if let Ok(banks) = &result {
+                send_progress(ScanProgress::Subtitles {
+                    reading_scripts: compiled_links.is_none(),
+                });
                 sc_mod_tool_core::subtitles::load_verified_subtitles(
                     &root,
                     &language,
                     banks,
                     &mut compiled_links,
+                    &cancelled,
                 )
             } else {
                 Ok(SubtitleAnalysis::default())
             };
+            // Subtitles are part of the scan, so cancelling them cancels it.
+            if matches!(subtitles, Err(Error::Cancelled)) {
+                result = Err(Error::Cancelled);
+            }
             let _ = sender.send(WorkerMessage::Banks {
                 request,
                 result,
@@ -267,7 +281,30 @@ impl SCModToolApp {
     fn cancel_scan(&mut self) {
         if let Some(cancelled) = &self.scan_cancel {
             cancelled.store(true, Ordering::Relaxed);
-            self.set_status("Cancelling scan...", false);
+        }
+    }
+
+    fn is_cancelling_scan(&self) -> bool {
+        self.scan_cancel
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
+    }
+
+    /// What the scan in progress is doing, to show the user.
+    fn scan_activity(&self) -> &'static str {
+        let reading_scripts = matches!(
+            self.scan_progress,
+            Some(ScanProgress::Subtitles {
+                reading_scripts: true
+            })
+        );
+        match (self.is_cancelling_scan(), &self.scan_progress) {
+            // UELib can't be interrupted, so cancelling waits for it.
+            (true, _) if reading_scripts => "Cancelling once the game's scripts are read…",
+            (true, _) => "Cancelling scan…",
+            (false, _) if reading_scripts => "Reading the game's scripts for subtitles…",
+            (false, Some(ScanProgress::Subtitles { .. })) => "Matching subtitles…",
+            (false, _) => "Scanning sound banks…",
         }
     }
 
@@ -411,18 +448,9 @@ impl SCModToolApp {
                         }
                     }
                 }
-                WorkerMessage::ScanProgress {
-                    request,
-                    completed,
-                    total,
-                    bank,
-                } => {
+                WorkerMessage::ScanProgress { request, progress } => {
                     if request == self.scan_request {
-                        self.scan_progress = Some(ScanProgress {
-                            completed,
-                            total,
-                            bank,
-                        });
+                        self.scan_progress = Some(progress);
                     }
                 }
                 WorkerMessage::Banks {

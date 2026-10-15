@@ -50,11 +50,14 @@ fn decodes_every_discovered_game_segment() {
     for language in languages {
         let banks = discover_banks(&game_root, &language.directory)
             .unwrap_or_else(|error| panic!("Could not scan {}: {error}", language.label));
-        let subtitles =
-            load_verified_subtitles(&game_root, &language.directory, &banks, &mut compiled_links)
-                .unwrap_or_else(|error| {
-                    panic!("Could not load {} subtitles: {error}", language.label)
-                });
+        let subtitles = load_verified_subtitles(
+            &game_root,
+            &language.directory,
+            &banks,
+            &mut compiled_links,
+            &cancelled,
+        )
+        .unwrap_or_else(|error| panic!("Could not load {} subtitles: {error}", language.label));
         if language.directory.eq_ignore_ascii_case("ENGLISH")
             || language.directory.eq_ignore_ascii_case("GERMAN")
         {
