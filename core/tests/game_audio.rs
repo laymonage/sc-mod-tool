@@ -58,15 +58,11 @@ fn decodes_every_discovered_game_segment() {
             &cancelled,
         )
         .unwrap_or_else(|error| panic!("Could not load {} subtitles: {error}", language.label));
-        if language.directory.eq_ignore_ascii_case("ENGLISH")
-            || language.directory.eq_ignore_ascii_case("GERMAN")
-        {
-            assert!(
-                subtitles.mapped_pairs > 0,
-                "{}: expected direct compiled subtitle/audio links",
-                language.label
-            );
-        }
+        assert!(
+            subtitles.mapped_pairs > 0,
+            "{}: expected direct compiled subtitle/audio links; are its localization files missing?",
+            language.label
+        );
         if language.directory.eq_ignore_ascii_case("GERMAN") {
             // German keeps leftover lines in this scene's section, so it's
             // aligned against English and its text looked up by cue name.
