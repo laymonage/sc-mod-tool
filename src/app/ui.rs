@@ -270,30 +270,31 @@ impl SCModToolApp {
                 );
                 ui.add_space(4.0);
 
-                let filter = self.bank_filter.to_ascii_lowercase();
+                let filter = self.bank_filter.to_lowercase();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.with_layout(Layout::top_down_justified(Align::LEFT), |ui| {
                             let mut shown = 0;
-                            let mut shown_map = None;
+                            let mut shown_group: Option<&str> = None;
                             for (index, bank) in self.banks.iter().enumerate() {
-                                if !bank.name.to_ascii_lowercase().contains(&filter)
-                                    && !bank.map.as_ref().is_some_and(|map| {
-                                        map.to_ascii_lowercase().contains(&filter)
-                                    })
+                                if ![
+                                    Some(&bank.name),
+                                    bank.map.as_ref(),
+                                    bank.mission_name.as_ref(),
+                                ]
+                                .into_iter()
+                                .flatten()
+                                .any(|text| text.to_lowercase().contains(&filter))
                                 {
                                     continue;
                                 }
                                 shown += 1;
-                                // Extra maps' banks come after the language's
-                                // own, under the map's name.
-                                if let Some(map) = &bank.map
-                                    && shown_map != Some(map)
-                                {
+                                let group = mission_label(bank).unwrap_or("Other");
+                                if shown_group != Some(group) {
                                     ui.add_space(6.0);
-                                    ui.label(RichText::new(map).small().weak());
-                                    shown_map = Some(map);
+                                    ui.label(RichText::new(group).small().weak());
+                                    shown_group = Some(group);
                                 }
                                 if bank_row(ui, bank, self.selected_bank == Some(index)).clicked() {
                                     actions.push(Action::SelectBank(index));
@@ -319,14 +320,12 @@ impl SCModToolApp {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(&bank.name).heading());
-            let map = bank
-                .map
-                .as_ref()
-                .map(|map| format!("{map} · "))
+            let mission = mission_label(bank)
+                .map(|mission| format!("{mission} · "))
                 .unwrap_or_default();
             ui.label(
                 RichText::new(format!(
-                    "{map}{} segments · {}",
+                    "{mission}{} segments · {}",
                     bank.segments.len(),
                     format_bytes(bank.size)
                 ))
@@ -757,6 +756,12 @@ fn detail_row(ui: &mut egui::Ui, name: &str, value: String) {
 
 fn segment_label(bank: &Bank, segment: &Segment) -> String {
     format!("{} #{}", bank_title(bank), segment.segment + 1)
+}
+
+/// The bank's mission name, or its extra map's folder when `HUD` doesn't name
+/// it.
+fn mission_label(bank: &Bank) -> Option<&str> {
+    bank.mission_name.as_deref().or(bank.map.as_deref())
 }
 
 /// The bank's name, after its extra map's when it has one, since maps reuse

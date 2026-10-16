@@ -1,6 +1,6 @@
 mod alignment;
 mod bridge;
-mod localization;
+pub(crate) mod localization;
 pub(crate) mod map;
 
 use std::collections::{HashMap, HashSet};
@@ -366,6 +366,7 @@ mod tests {
             map: None,
             path: "ENGLISH/1_1_2.LS0".to_owned(),
             code: "1_1_2".to_owned(),
+            mission_name: Some("Police Station".to_owned()),
             size: 0,
             issue: None,
             segments: offsets

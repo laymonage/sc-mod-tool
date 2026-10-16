@@ -45,7 +45,7 @@ pub(super) fn localization_sections(
     Ok(sections)
 }
 
-pub(super) fn parse_sections(text: &str, sections: &mut HashMap<String, Vec<(String, String)>>) {
+pub(crate) fn parse_sections(text: &str, sections: &mut HashMap<String, Vec<(String, String)>>) {
     let mut current: Option<String> = None;
     for line in text.lines().map(str::trim) {
         if let Some(name) = line
@@ -69,7 +69,7 @@ pub(super) fn parse_sections(text: &str, sections: &mut HashMap<String, Vec<(Str
     }
 }
 
-pub(super) fn localization_path(
+pub(crate) fn localization_path(
     localization_root: &Path,
     base_name: &str,
     extension: &str,
