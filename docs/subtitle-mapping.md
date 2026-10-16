@@ -63,7 +63,7 @@ language folder's in two ways:
 - **Reused names.** Both Vselka folders have a `3_1_1.LS0`, with different
   audio. A map's records only describe its own banks, so each folder's banks
   are matched against its own `MAPS.LM0`
-  ([`resolve_segments`](../core/src/subtitles.rs)). A sound found in several
+  ([`resolve_segments`](../core/src/subtitles/map.rs)). A sound found in several
   maps gets its subtitle on each copy.
 
 The app lists these banks under the language, grouped by map. They hold the
@@ -100,7 +100,7 @@ A table of 128-byte records, one per sound. The fields used:
 | `+80` | Bank file name, such as `1_3_2.LS0`, null-terminated, up to 32 bytes |
 
 The parser finds records by scanning every 4-byte position for this shape
-(`parse_map_records` in [`subtitles.rs`](../core/src/subtitles.rs)).
+(`parse_map_records` in [`map.rs`](../core/src/subtitles/map.rs)).
 
 **Use the bank name in the record.** A level can play a sound from another
 level's package: level 1_3_2 plays `S1_3_3Voice.Play_13_21_01`, whose audio is

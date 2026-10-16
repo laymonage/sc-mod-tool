@@ -314,6 +314,26 @@ fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, String> {
         .collect()
 }
 
+fn find_file(directory: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("Could not read directory {}: {error}", directory.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Could not inspect {}: {error}", directory.display()))?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(file_name)
+        {
+            return Ok(entry.path());
+        }
+    }
+    Err(format!(
+        "File {file_name} was not found in {}.",
+        directory.display()
+    ))
+}
+
 fn collect_banks(
     directory: &Path,
     relative_directory: &Path,

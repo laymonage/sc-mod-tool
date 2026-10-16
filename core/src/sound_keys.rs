@@ -16,7 +16,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::subtitles::{find_file, parse_map_records};
+use crate::find_file;
+use crate::subtitles::map::parse_map_records;
 
 /// How far apart, in seconds, a lip-sync duration and a clip can be to match.
 const DURATION_TOLERANCE: f64 = 0.15;
