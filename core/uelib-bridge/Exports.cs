@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using UELib;
 using UELib.Core;
+using UELib.Services;
 
 namespace SCModUELibBridge;
 
@@ -18,6 +19,8 @@ public static unsafe class Exports
             // UELib prints a summary of every package it loads, which would
             // mix into the host program's stdout.
             Console.SetOut(TextWriter.Null);
+            var log = new BridgeLog();
+            LibServices.LogService = log;
 
             var gameRoot = Marshal.PtrToStringUTF8((nint)gameRootUtf8);
             if (gameRoot is null)
@@ -25,7 +28,7 @@ public static unsafe class Exports
                 return WriteFailure(outputUtf8, outputCapacity, "Game directory path is null.");
             }
 
-            var result = AnalyzeGame(gameRoot);
+            var result = AnalyzeGame(gameRoot, log);
             return WriteResult(outputUtf8, outputCapacity, result);
         }
         catch (Exception error)
@@ -34,7 +37,7 @@ public static unsafe class Exports
         }
     }
 
-    private static BridgeResult AnalyzeGame(string gameRoot)
+    private static BridgeResult AnalyzeGame(string gameRoot, BridgeLog log)
     {
         var systemRoot = Path.Combine(gameRoot, "system");
         var soundsRoot = Path.Combine(gameRoot, "Sounds");
@@ -48,6 +51,14 @@ public static unsafe class Exports
         }
 
         var issues = new List<string>();
+        void ReportLogged(string doing)
+        {
+            foreach (var error in log.Drain())
+            {
+                issues.Add($"UELib recovered from an error {doing}: {error}");
+            }
+        }
+
         var sourcePairs = new HashSet<SourcePair>();
         var patterns = new Dictionary<string, PatternCalls>(StringComparer.Ordinal);
         foreach (var packagePath in FindScriptPackages(systemRoot))
@@ -57,6 +68,7 @@ public static unsafe class Exports
                 using var package = UnrealLoader.LoadPackage(packagePath, FileAccess.Read);
                 package.InitializePackage(
                     UnrealPackage.InitFlags.Construct | UnrealPackage.InitFlags.RegisterClasses);
+                ReportLogged($"loading {packagePath}");
 
                 foreach (var scriptObject in package.Objects
                              .OfType<UStruct>()
@@ -93,11 +105,19 @@ public static unsafe class Exports
                     {
                         issues.Add($"Could not decompile {sourceObject} from {packagePath}: {error.Message}");
                     }
+                    finally
+                    {
+                        ReportLogged($"decompiling {sourceObject} from {packagePath}");
+                    }
                 }
             }
             catch (Exception error)
             {
                 issues.Add($"Could not load script package {packagePath}: {error.Message}");
+            }
+            finally
+            {
+                ReportLogged($"loading {packagePath}");
             }
         }
 
@@ -124,6 +144,10 @@ public static unsafe class Exports
                 catch (Exception error)
                 {
                     issues.Add($"Could not load sound package {path}: {error.Message}");
+                }
+                finally
+                {
+                    ReportLogged($"loading {path}");
                 }
             }
             soundPackages.Add(name, soundPackage);
