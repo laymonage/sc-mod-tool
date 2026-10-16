@@ -28,7 +28,8 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         build.flag("/std:c11");
     } else {
-        build.flag("-std=c11");
+        // vgmstream's decoder mixes signed and unsigned comparisons.
+        build.flag("-std=c11").flag("-Wno-sign-compare");
     }
     build.compile("sc1_vgmstream_decoder");
 
