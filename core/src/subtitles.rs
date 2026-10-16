@@ -788,15 +788,17 @@ fn localization_sections(
             localization_root.display()
         )
     })?;
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
     let mut sections = HashMap::<String, Vec<(String, String)>>::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path
-            .extension()
-            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
-        {
-            continue;
-        }
+    for path in paths {
         let Ok(bytes) = fs::read(&path) else {
             continue;
         };
