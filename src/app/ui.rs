@@ -204,7 +204,7 @@ impl SCModToolApp {
                         && ui
                             .small_button(
                                 RichText::new(format!(
-                                    "⚠ {} subtitle warnings",
+                                    "⚠ {} warnings",
                                     self.subtitle_warnings.len()
                                 ))
                                 .color(ui.visuals().warn_fg_color),
@@ -581,7 +581,7 @@ impl SCModToolApp {
 
     fn show_warnings_window(&mut self, ctx: &egui::Context) {
         let warnings = &self.subtitle_warnings;
-        egui::Window::new("Subtitle warnings")
+        egui::Window::new("Warnings")
             .open(&mut self.show_warnings)
             .pivot(Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
