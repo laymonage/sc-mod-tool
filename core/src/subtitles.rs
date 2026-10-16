@@ -232,17 +232,7 @@ pub fn load_verified_subtitles(
             let bytes = fs::read(&localization_path).map_err(|error| {
                 format!("Could not read {}: {error}", localization_path.display())
             })?;
-            let (text, _, had_errors) = WINDOWS_1252.decode(&bytes);
-            if had_errors {
-                push_warning(
-                    &mut analysis.warnings,
-                    format!(
-                        "Could not decode localization file as Windows-1252: {}",
-                        localization_path.display()
-                    ),
-                );
-                continue;
-            }
+            let (text, _, _) = WINDOWS_1252.decode(&bytes);
             localization_cache.insert(localization_path.clone(), text.into_owned());
         }
         let text = match find_cue(
