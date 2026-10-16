@@ -195,9 +195,6 @@ pub fn load_verified_subtitles(
     compiled_links: &mut Option<Arc<CompiledLinks>>,
     cancelled: &AtomicBool,
 ) -> Result<SubtitleAnalysis, Error> {
-    if language == "." {
-        return Ok(SubtitleAnalysis::default());
-    }
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }

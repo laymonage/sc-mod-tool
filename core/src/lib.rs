@@ -79,22 +79,6 @@ pub fn discover_languages(root: &Path) -> Result<Vec<Language>, Error> {
         }
     }
 
-    let mut root_banks = Vec::new();
-    for entry in read_directory(&sounds)? {
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?;
-        if file_type.is_file() && is_supported_bank_name(&entry.file_name().to_string_lossy()) {
-            root_banks.push(entry.path());
-        }
-    }
-    if !root_banks.is_empty() {
-        languages.push(Language {
-            directory: ".".to_owned(),
-            label: "Sounds root".to_owned(),
-        });
-    }
-
     languages.sort_by(|left, right| {
         left.label
             .to_ascii_lowercase()
@@ -126,12 +110,10 @@ pub fn discover_banks_with_progress(
         map: None,
         relative_path: language.to_owned(),
     }];
-    if language != "." {
-        if !safe_child_path(&sounds, language)?.is_dir() {
-            return Err(format!("Language folder was not found: {language}").into());
-        }
-        folders.extend(map_language_folders(&sounds, language)?);
+    if known_language(language).is_none() || !safe_child_path(&sounds, language)?.is_dir() {
+        return Err(format!("Language folder was not found: {language}").into());
     }
+    folders.extend(map_language_folders(&sounds, language)?);
 
     let mut files = Vec::new();
     for folder in &folders {
@@ -750,6 +732,7 @@ mod tests {
         fs::write(english.join("2_2.LS0"), [0; 200]).unwrap();
         fs::write(english.join("Music_Common.LS0"), make_segment()).unwrap();
         fs::write(german.join("1_1_0.LS0"), make_segment()).unwrap();
+        fs::write(game.path().join("Sounds/1_1_0.LS0"), make_segment()).unwrap();
 
         let languages = discover_languages(game.path()).unwrap();
         assert_eq!(
@@ -759,6 +742,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["ENGLISH", "GERMAN"]
         );
+        assert!(discover_banks(game.path(), ".").is_err());
         let banks = discover_banks(game.path(), "ENGLISH").unwrap();
         assert_eq!(banks.len(), 2);
         let supported = banks.iter().find(|bank| bank.name == "1_1_0.LS0").unwrap();
