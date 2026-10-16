@@ -107,12 +107,18 @@ pub(crate) fn correct(
         .and_then(|root| find_file(&root, "int"))
         .ok()
     else {
+        corrections
+            .notes
+            .push(skipped_note("LIPSYNCH/int wasn't found"));
         return corrections;
     };
     let Some(mut durations) = find_file(sounds, "ENGLISH")
         .ok()
         .and_then(|english| map_clip_durations(&english))
     else {
+        corrections
+            .notes
+            .push(skipped_note("Sounds/ENGLISH/MAPS.LM0 wasn't found"));
         return corrections;
     };
     // Extra maps have the only copies of some packages' audio, such as
@@ -157,6 +163,12 @@ pub(crate) fn correct(
         );
     }
     corrections
+}
+
+fn skipped_note(reason: &str) -> String {
+    format!(
+        "Sound keys weren't checked against lip-sync data, because {reason}. A few packages store scrambled keys, so some subtitles may be on the wrong clips."
+    )
 }
 
 /// Reads the clip durations from the `MAPS.LM0` in `folder`.
@@ -273,7 +285,7 @@ fn correct_package(sounds: &[Candidate], durations: &HashMap<u32, f64>) -> (Vec<
                 let high = keys[run[run.len() - 1]];
                 let mut trial = keys.clone();
                 for &index in run {
-                    trial[index] = low + high - keys[index];
+                    trial[index] = low + (high - keys[index]);
                 }
                 let gain = score(&trial, run) - score(&keys, run);
                 let better = best.as_ref().is_none_or(|(best_gain, best_run, _)| {
@@ -364,6 +376,21 @@ fn correct_package(sounds: &[Candidate], durations: &HashMap<u32, f64>) -> (Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warns_when_keys_cant_be_checked() {
+        let game = tempfile::tempdir().unwrap();
+        fs::create_dir_all(game.path().join("LIPSYNCH/int")).unwrap();
+        let sounds = game.path().join("Sounds");
+        fs::create_dir_all(sounds.join("GERMAN")).unwrap();
+
+        let corrections = correct(game.path(), &sounds, &[], &HashSet::new());
+
+        assert_eq!(
+            corrections.notes,
+            [skipped_note("Sounds/ENGLISH/MAPS.LM0 wasn't found")]
+        );
+    }
 
     fn candidate(name: &str, export_index: u32, key: u32, lip_sync: Option<f64>) -> Candidate<'_> {
         Candidate {

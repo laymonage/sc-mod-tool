@@ -427,18 +427,11 @@ impl SCModToolApp {
                     }
                     self.discovering_languages = false;
                     match result {
-                        Ok(languages) if !languages.is_empty() => {
-                            let first = languages[0].directory.clone();
+                        Ok(languages) => {
+                            self.selected_language =
+                                languages.first().map(|language| language.directory.clone());
                             self.languages = languages;
-                            self.selected_language = Some(first);
                             self.start_scan(ctx);
-                        }
-                        Ok(_) => {
-                            self.languages.clear();
-                            self.set_status(
-                                "No language folders with numeric .LS0 banks were found.",
-                                true,
-                            );
                         }
                         Err(error) => {
                             self.set_status(format!("Could not find sound banks: {error}"), true)
