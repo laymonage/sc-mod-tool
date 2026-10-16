@@ -36,9 +36,6 @@ pub struct Bank {
 #[derive(Clone, Debug)]
 pub struct Segment {
     pub id: String,
-    pub language: String,
-    pub bank: String,
-    pub code: String,
     pub offset: u64,
     /// The length of the stream itself. Banks pad streams to 4-byte
     /// boundaries, and the padding isn't included.
@@ -153,7 +150,7 @@ pub fn discover_banks_with_progress(
             .to_owned();
         let code = mission_code(&name).unwrap_or_default();
         let path = relative_path.to_string_lossy().replace('\\', "/");
-        let segments = scan_bank(&bytes, &name, &path, language, &code, cancelled)?;
+        let segments = scan_bank(&bytes, &path, cancelled)?;
         let issue = if segments.is_empty() {
             Some(diagnose_unrecognized_bank(&bytes))
         } else {
@@ -453,14 +450,7 @@ fn has_valid_frame(bytes: &[u8], offset: usize) -> bool {
         && read_u32_le(bytes, offset) == Some(2)
 }
 
-fn scan_bank(
-    bytes: &[u8],
-    bank_name: &str,
-    bank_path: &str,
-    language: &str,
-    code: &str,
-    cancelled: &AtomicBool,
-) -> Result<Vec<Segment>, Error> {
+fn scan_bank(bytes: &[u8], bank_path: &str, cancelled: &AtomicBool) -> Result<Vec<Segment>, Error> {
     let mut segments: Vec<Segment> = Vec::new();
     let mut offset = 0usize;
 
@@ -583,9 +573,6 @@ fn scan_bank(
 
         segments.push(Segment {
             id: format!("{bank_path}:{offset}"),
-            language: language.to_owned(),
-            bank: bank_name.to_owned(),
-            code: code.to_owned(),
             offset: offset as u64,
             byte_length: byte_length as u64,
             sample_count,
@@ -670,19 +657,10 @@ mod tests {
         bytes.extend_from_slice(&second);
 
         let cancelled = AtomicBool::new(false);
-        let segments = scan_bank(
-            &bytes,
-            "1_2.LS0",
-            "ENGLISH/1_2.LS0",
-            "ENGLISH",
-            "1_2",
-            &cancelled,
-        )
-        .unwrap();
+        let segments = scan_bank(&bytes, "ENGLISH/1_2.LS0", &cancelled).unwrap();
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].offset, 0);
         assert_eq!(segments[0].id, "ENGLISH/1_2.LS0:0");
-        assert_eq!(segments[0].language, "ENGLISH");
         assert_eq!(segments[0].byte_length, 103);
         assert_eq!(segments[0].sample_count, 4);
         assert_eq!(segments[0].sample_rate, 36000);
@@ -698,32 +676,18 @@ mod tests {
         assert_eq!(mission_code("1_2_3.uax"), None);
         let cancelled = AtomicBool::new(false);
         assert!(
-            scan_bank(
-                &[0; 200],
-                "1_2.LS0",
-                "ENGLISH/1_2.LS0",
-                "ENGLISH",
-                "1_2",
-                &cancelled
-            )
-            .unwrap()
-            .is_empty()
+            scan_bank(&[0; 200], "ENGLISH/1_2.LS0", &cancelled)
+                .unwrap()
+                .is_empty()
         );
         assert!(diagnose_unrecognized_bank(&[0; 200]).contains("unsupported layout"));
 
         let mut truncated = make_segment();
         truncated.truncate(80);
         assert!(
-            scan_bank(
-                &truncated,
-                "1_2.LS0",
-                "ENGLISH/1_2.LS0",
-                "ENGLISH",
-                "1_2",
-                &cancelled
-            )
-            .unwrap()
-            .is_empty()
+            scan_bank(&truncated, "ENGLISH/1_2.LS0", &cancelled)
+                .unwrap()
+                .is_empty()
         );
         assert!(diagnose_unrecognized_bank(&truncated).contains("malformed or truncated"));
     }

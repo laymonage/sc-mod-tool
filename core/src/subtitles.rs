@@ -373,9 +373,6 @@ mod tests {
                 .enumerate()
                 .map(|(index, &offset)| super::super::Segment {
                     id: format!("ENGLISH/1_1_2.LS0:{offset}"),
-                    language: "ENGLISH".to_owned(),
-                    bank: "1_1_2.LS0".to_owned(),
-                    code: "1_1_2".to_owned(),
                     offset,
                     byte_length: 10,
                     sample_count: 20,
