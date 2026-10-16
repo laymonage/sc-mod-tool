@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use super::push_warning;
 use crate::sound_keys::PackageKeys;
 
-const MAP_RECORD_SIZE: usize = 56;
+/// The bytes holding the fields every record needs. Records are 128 bytes, but
+/// the sample rate and bank name after these are optional.
+const MAP_RECORD_REQUIRED_SIZE: usize = 56;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MapRecord {
@@ -83,11 +85,11 @@ pub(super) fn clip_seconds(key: u32, maps: &[SoundMap]) -> Option<f64> {
 
 pub(crate) fn parse_map_records(data: &[u8]) -> HashMap<u32, HashSet<MapRecord>> {
     let mut records = HashMap::<u32, HashSet<MapRecord>>::new();
-    if data.len() < MAP_RECORD_SIZE {
+    if data.len() < MAP_RECORD_REQUIRED_SIZE {
         return records;
     }
 
-    for position in (0..=data.len() - MAP_RECORD_SIZE).step_by(4) {
+    for position in (0..=data.len() - MAP_RECORD_REQUIRED_SIZE).step_by(4) {
         let Some(key) = read_u32(data, position) else {
             continue;
         };
@@ -268,7 +270,7 @@ mod tests {
 
     #[test]
     fn ignores_malformed_or_unaligned_map_records() {
-        let mut data = vec![0; MAP_RECORD_SIZE + 8];
+        let mut data = vec![0; MAP_RECORD_REQUIRED_SIZE + 8];
         write_u32(&mut data, 1, 0x0084_0001);
         write_u32(&mut data, 5, 1);
         write_u32(&mut data, 9, 1);
