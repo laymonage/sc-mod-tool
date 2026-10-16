@@ -292,6 +292,15 @@ text, and 77 with no line. Most of the 77 are the Vselka maps' `S3_1_1Voice`
 sounds, which use another version of the package's keys. German has no extra
 map folders.
 
+Mission 3's own scenes (`P_3_4_1Severonickel` to `P_3_4_4Severonickel`) cue
+radio messages from localization files this release doesn't ship, so each
+language with extra maps gets four "Localization file … was not found"
+warnings. Their 28 cues point at 16 segments. 15 of those are in
+`1_6_1_1kolacell`, whose own scenes play the same sounds and do have
+localization, so they get their lines from there. The one left is
+`1_7_1_2Vselka/English/3_4_3.LS0` #1 (`Play_34_64_02`), one of the 77 with no
+line.
+
 The 4 segments with no line in any localization file:
 
 | Segment | What it is |
