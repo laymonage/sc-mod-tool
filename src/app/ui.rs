@@ -348,6 +348,15 @@ impl SCModToolApp {
 
         ui.add_space(4.0);
         let visible = self.visible_segments();
+        // Clear a selection the filters hide instead of moving it, so typing a
+        // search doesn't change what's selected.
+        if self
+            .selected_segment
+            .is_some_and(|selected| !visible.contains(&selected))
+        {
+            self.selected_segment = None;
+            ui.ctx().request_repaint();
+        }
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.segment_filter)
@@ -594,7 +603,7 @@ impl SCModToolApp {
     }
 
     /// The selected bank's segments that match the search and filters.
-    fn visible_segments(&self) -> Vec<usize> {
+    pub(super) fn visible_segments(&self) -> Vec<usize> {
         let Some(bank) = self.selected_bank() else {
             return Vec::new();
         };

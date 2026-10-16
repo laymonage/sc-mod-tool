@@ -325,10 +325,7 @@ impl SCModToolApp {
     }
 
     fn select_first_segment(&mut self) {
-        self.selected_segment = self
-            .selected_bank()
-            .is_some_and(|bank| !bank.segments.is_empty())
-            .then_some(0);
+        self.selected_segment = self.visible_segments().first().copied();
         self.scroll_to_selection = true;
     }
 
