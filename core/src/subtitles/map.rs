@@ -197,9 +197,9 @@ fn resolve_segment<'a>(
                 .is_none_or(|code| bank.code.eq_ignore_ascii_case(code)),
         }) {
             for segment in &bank.segments {
-                if segment.offset == u64::from(record.offset)
+                if segment.stream_range()
+                    == Some((u64::from(record.offset), u64::from(record.compressed_bytes)))
                     && segment.sample_count == record.sample_count
-                    && segment.byte_length == u64::from(record.compressed_bytes)
                     && !matches
                         .iter()
                         .any(|matched: &&crate::Segment| matched.id == segment.id)
@@ -306,7 +306,7 @@ mod tests {
             bank.map = Some(map.to_owned());
             bank.path = format!("{map}/English/3_1_1.LS0");
             for segment in &mut bank.segments {
-                segment.id = format!("{}:{}", bank.path, segment.offset);
+                segment.id = format!("{}:{}", bank.path, segment.stream_range().unwrap().0);
             }
             bank
         };

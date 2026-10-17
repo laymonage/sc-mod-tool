@@ -1,7 +1,7 @@
 use eframe::egui::{self, Align, Align2, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use sc_mod_tool_core::{
-    Bank, Segment,
+    Bank, Segment, SegmentSource,
     subtitles::{MappingConfidence, Subtitle},
 };
 
@@ -323,14 +323,17 @@ impl SCModToolApp {
             let mission = mission_label(bank)
                 .map(|mission| format!("{mission} · "))
                 .unwrap_or_default();
-            ui.label(
-                RichText::new(format!(
-                    "{mission}{} segments · {}",
+            let contents = if bank.area.is_some() {
+                // A map's banks share its file, so its size isn't theirs.
+                format!("{} sounds · {}", bank.segments.len(), bank.path)
+            } else {
+                format!(
+                    "{} segments · {}",
                     bank.segments.len(),
                     format_bytes(bank.size)
-                ))
-                .weak(),
-            );
+                )
+            };
+            ui.label(RichText::new(format!("{mission}{contents}")).weak());
         });
         if let Some(issue) = &bank.issue {
             ui.add_space(8.0);
@@ -356,19 +359,28 @@ impl SCModToolApp {
             self.selected_segment = None;
             ui.ctx().request_repaint();
         }
+        // Map sounds have names, but no subtitles.
+        let is_map_bank = bank.area.is_some();
         ui.horizontal(|ui| {
+            let hint = if is_map_bank {
+                "🔍 Search names"
+            } else {
+                "🔍 Search subtitles and cues"
+            };
             ui.add(
                 egui::TextEdit::singleline(&mut self.segment_filter)
-                    .hint_text("🔍 Search subtitles and cues")
+                    .hint_text(hint)
                     .desired_width(260.0),
             );
-            egui::ComboBox::from_id_salt("text-filter")
-                .selected_text(self.text_filter.label())
-                .show_ui(ui, |ui| {
-                    for filter in TextFilter::ALL {
-                        ui.selectable_value(&mut self.text_filter, filter, filter.label());
-                    }
-                });
+            if !is_map_bank {
+                egui::ComboBox::from_id_salt("text-filter")
+                    .selected_text(self.text_filter.label())
+                    .show_ui(ui, |ui| {
+                        for filter in TextFilter::ALL {
+                            ui.selectable_value(&mut self.text_filter, filter, filter.label());
+                        }
+                    });
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!("{} of {}", visible.len(), bank.segments.len())).weak(),
@@ -401,9 +413,14 @@ impl SCModToolApp {
             table = table.scroll_to_row(row, None);
         }
 
+        let titles = if is_map_bank {
+            ["", "#", "Duration", "Channels", "Key", "Name"]
+        } else {
+            ["", "#", "Duration", "Size", "Offset", "Subtitle"]
+        };
         table
             .header(22.0, |mut header| {
-                for title in ["", "#", "Duration", "Size", "Offset", "Subtitle"] {
+                for title in titles {
                     header.col(|ui| {
                         ui.strong(title);
                     });
@@ -436,47 +453,34 @@ impl SCModToolApp {
                     row.col(|ui| {
                         ui.label(format_duration(segment));
                     });
-                    row.col(|ui| {
-                        ui.label(format_bytes(segment.byte_length));
-                    });
-                    row.col(|ui| {
-                        ui.label(RichText::new(segment.offset.to_string()).monospace());
-                    });
-                    row.col(|ui| match self.subtitles.get(&segment.id) {
-                        Some(subtitles) => {
-                            // Subtitles with text are sorted first, so if
-                            // the first has none, none of them do.
-                            let Some(mut text) = subtitles[0].text.clone() else {
+                    match segment.source {
+                        SegmentSource::MapSound { key, .. } => {
+                            row.col(|ui| {
+                                ui.label(format_channels(segment.channels));
+                            });
+                            row.col(|ui| {
+                                ui.label(RichText::new(format_key(key)).monospace());
+                            });
+                            row.col(|ui| {
                                 ui.add(
-                                    egui::Label::new(
-                                        RichText::new(format!("{NO_TEXT} · {}", subtitles[0].cue))
-                                            .italics()
-                                            .weak(),
-                                    )
-                                    .truncate(),
-                                )
-                                .on_hover_text(NO_TEXT_HINT);
-                                return;
-                            };
-                            if subtitles.len() > 1 {
-                                text.push_str(&format!("  (+{} more)", subtitles.len() - 1));
-                            }
-                            // Subtitles the game shows are sorted next, so
-                            // this means none of them are shown.
-                            if is_shown_in_game(&subtitles[0]) {
-                                ui.add(egui::Label::new(text).truncate());
-                            } else {
-                                ui.add(
-                                    egui::Label::new(RichText::new(text).italics().weak())
+                                    egui::Label::new(segment.name.as_deref().unwrap_or_default())
                                         .truncate(),
-                                )
-                                .on_hover_text(NOT_SHOWN_IN_GAME);
-                            }
+                                );
+                            });
                         }
-                        None => {
-                            ui.label(RichText::new("—").weak());
+                        SegmentSource::Stream {
+                            offset,
+                            byte_length,
+                        } => {
+                            row.col(|ui| {
+                                ui.label(format_bytes(byte_length));
+                            });
+                            row.col(|ui| {
+                                ui.label(RichText::new(offset.to_string()).monospace());
+                            });
+                            row.col(|ui| subtitle_cell(ui, self.subtitles.get(&segment.id)));
                         }
-                    });
+                    }
 
                     let response = row.response();
                     if response.double_clicked() {
@@ -507,7 +511,12 @@ impl SCModToolApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(6.0);
-                        ui.label(RichText::new(format!("Segment {}", index + 1)).heading());
+                        let noun = if bank.area.is_some() {
+                            "Sound"
+                        } else {
+                            "Segment"
+                        };
+                        ui.label(RichText::new(format!("{noun} {}", index + 1)).heading());
                         ui.label(RichText::new(bank_title(bank)).weak());
                         ui.add_space(8.0);
 
@@ -535,29 +544,38 @@ impl SCModToolApp {
                                     "Sample rate",
                                     format!("{} Hz", segment.sample_rate),
                                 );
-                                detail_row(
-                                    ui,
-                                    "Channels",
-                                    if segment.channels == 1 {
-                                        "Mono".to_owned()
-                                    } else {
-                                        segment.channels.to_string()
-                                    },
-                                );
-                                detail_row(ui, "Format", segment.codec.to_owned());
-                                detail_row(
-                                    ui,
-                                    "Size",
-                                    format!(
-                                        "{} ({} bytes)",
-                                        format_bytes(segment.byte_length),
-                                        segment.byte_length
-                                    ),
-                                );
-                                detail_row(ui, "Offset", segment.offset.to_string());
+                                detail_row(ui, "Channels", format_channels(segment.channels));
+                                detail_row(ui, "Format", segment.codec.clone());
+                                match segment.source {
+                                    SegmentSource::Stream {
+                                        offset,
+                                        byte_length,
+                                    } => {
+                                        detail_row(
+                                            ui,
+                                            "Size",
+                                            format!(
+                                                "{} ({byte_length} bytes)",
+                                                format_bytes(byte_length)
+                                            ),
+                                        );
+                                        detail_row(ui, "Offset", offset.to_string());
+                                    }
+                                    SegmentSource::MapSound { subsong, key } => {
+                                        if let Some(name) = &segment.name {
+                                            detail_row(ui, "Name", name.clone());
+                                        }
+                                        detail_row(ui, "Key", format_key(key));
+                                        detail_row(ui, "Map entry", subsong.to_string());
+                                    }
+                                }
                                 detail_row(ui, "File", bank.path.clone());
                             });
 
+                        // Map sounds have no subtitles.
+                        if bank.area.is_some() {
+                            return;
+                        }
                         ui.add_space(8.0);
                         ui.separator();
                         let subtitles = self
@@ -607,6 +625,21 @@ impl SCModToolApp {
             return Vec::new();
         };
         let query = self.segment_filter.trim().to_lowercase();
+        if bank.area.is_some() {
+            // Map sounds have names instead of subtitles.
+            return bank
+                .segments
+                .iter()
+                .enumerate()
+                .filter(|(_, segment)| {
+                    segment
+                        .name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&query))
+                })
+                .map(|(index, _)| index)
+                .collect();
+        }
         bank.segments
             .iter()
             .enumerate()
@@ -700,6 +733,39 @@ fn bank_row(ui: &mut egui::Ui, bank: &Bank, selected: bool) -> egui::Response {
     }
 }
 
+/// A segment's first subtitle, for the segment table.
+fn subtitle_cell(ui: &mut egui::Ui, subtitles: Option<&Vec<Subtitle>>) {
+    let Some(subtitles) = subtitles else {
+        ui.label(RichText::new("—").weak());
+        return;
+    };
+    // Subtitles with text are sorted first, so if the first has none, none of
+    // them do.
+    let Some(mut text) = subtitles[0].text.clone() else {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("{NO_TEXT} · {}", subtitles[0].cue))
+                    .italics()
+                    .weak(),
+            )
+            .truncate(),
+        )
+        .on_hover_text(NO_TEXT_HINT);
+        return;
+    };
+    if subtitles.len() > 1 {
+        text.push_str(&format!("  (+{} more)", subtitles.len() - 1));
+    }
+    // Subtitles the game shows are sorted next, so this means none of them
+    // are shown.
+    if is_shown_in_game(&subtitles[0]) {
+        ui.add(egui::Label::new(text).truncate());
+    } else {
+        ui.add(egui::Label::new(RichText::new(text).italics().weak()).truncate())
+            .on_hover_text(NOT_SHOWN_IN_GAME);
+    }
+}
+
 fn is_shown_in_game(subtitle: &Subtitle) -> bool {
     subtitle.confidence == MappingConfidence::ExplicitCompiledReference
 }
@@ -780,6 +846,18 @@ fn format_duration(segment: &Segment) -> String {
     } else {
         format!("{}:{:04.1}", (seconds / 60.0).floor(), seconds % 60.0)
     }
+}
+
+fn format_channels(channels: u32) -> String {
+    match channels {
+        1 => "Mono".to_owned(),
+        2 => "Stereo".to_owned(),
+        _ => channels.to_string(),
+    }
+}
+
+fn format_key(key: Option<u32>) -> String {
+    key.map_or_else(|| "—".to_owned(), |key| format!("0x{key:08X}"))
 }
 
 fn format_bytes(bytes: u64) -> String {

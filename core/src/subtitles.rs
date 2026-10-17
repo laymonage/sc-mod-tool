@@ -364,6 +364,7 @@ mod tests {
         vec![super::super::Bank {
             name: "1_1_2.LS0".to_owned(),
             map: None,
+            area: None,
             path: "ENGLISH/1_1_2.LS0".to_owned(),
             code: "1_1_2".to_owned(),
             mission_name: Some("Police Station".to_owned()),
@@ -374,12 +375,15 @@ mod tests {
                 .enumerate()
                 .map(|(index, &offset)| super::super::Segment {
                     id: format!("ENGLISH/1_1_2.LS0:{offset}"),
-                    offset,
-                    byte_length: 10,
+                    source: super::super::SegmentSource::Stream {
+                        offset,
+                        byte_length: 10,
+                    },
+                    name: None,
                     sample_count: 20,
                     sample_rate: 36000,
                     channels: 1,
-                    codec: "Ubisoft ADPCM 4-bit",
+                    codec: "Ubisoft ADPCM 4-bit".to_owned(),
                     segment: index,
                 })
                 .collect(),

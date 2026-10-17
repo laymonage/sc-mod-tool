@@ -389,16 +389,7 @@ impl SCModToolApp {
         let repaint = ctx.clone();
 
         thread::spawn(move || {
-            let result = sc_mod_tool_core::read_segment_with_cancel(
-                &root,
-                &bank_path,
-                segment.offset,
-                segment.byte_length,
-                &cancelled,
-            )
-            .and_then(|bytes| {
-                sc_mod_tool_core::decoder::decode(&bytes, segment.sample_count, &cancelled)
-            });
+            let result = sc_mod_tool_core::decode_segment(&root, &bank_path, &segment, &cancelled);
             let _ = sender.send(WorkerMessage::Playback {
                 request,
                 segment_id,
@@ -503,7 +494,18 @@ impl SCModToolApp {
         self.banks = banks;
         self.select_first_segment();
 
-        let segment_count: usize = self.banks.iter().map(|bank| bank.segments.len()).sum();
+        let count = |is_map: bool| -> usize {
+            self.banks
+                .iter()
+                .filter(|bank| bank.area.is_some() == is_map)
+                .map(|bank| bank.segments.len())
+                .sum()
+        };
+        let found = format!(
+            "Found {} voice segments and {} map sounds",
+            count(false),
+            count(true)
+        );
         let with_text = self
             .subtitles
             .values()
@@ -511,13 +513,12 @@ impl SCModToolApp {
             .count();
         let with_empty_lines = self.subtitles.len() - with_text;
         match subtitle_error {
-            Some(error) => self.set_status(
-                format!("Found {segment_count} segments. Subtitles are unavailable: {error}"),
-                true,
-            ),
+            Some(error) => {
+                self.set_status(format!("{found}. Subtitles are unavailable: {error}"), true)
+            }
             None => self.set_status(
                 format!(
-                    "Found {segment_count} segments: {with_text} with subtitles, {with_empty_lines} with lines that have no text."
+                    "{found}. {with_text} segments have subtitles, and {with_empty_lines} have lines with no text."
                 ),
                 false,
             ),

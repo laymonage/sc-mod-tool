@@ -5,37 +5,85 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let vgmstream_root = manifest_dir.join("../vendor/vgmstream");
-    let decoder = vgmstream_root.join("src/coding/ubi_adpcm_decoder.c");
+    let vgmstream_source = manifest_dir.join("../vendor/vgmstream/src");
     let adapter = manifest_dir.join("src/decoder/ubi_adpcm_native.c");
-    if !decoder.is_file() {
+    if !vgmstream_source.join("libvgmstream.h").is_file() {
         panic!(
             "vgmstream source not found at {}. Initialize the submodule with `git submodule update --init --recursive`.",
-            vgmstream_root.display()
+            vgmstream_source.display()
         );
     }
 
-    println!("cargo:rerun-if-changed={}", decoder.display());
+    println!("cargo:rerun-if-changed={}", vgmstream_source.display());
     println!("cargo:rerun-if-changed={}", adapter.display());
+    let is_msvc = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
 
+    // The adapter uses vgmstream's internals, so it links before vgmstream.
     let mut build = cc::Build::new();
     build
         .file(&adapter)
-        .file(&decoder)
-        .include(vgmstream_root.join("src"))
-        .include(vgmstream_root.join("src/coding"))
-        .include(vgmstream_root.join("ext_includes"));
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        .include(&vgmstream_source)
+        .include(vgmstream_source.join("coding"))
+        .include(vgmstream_source.join("../ext_includes"));
+    if is_msvc {
         build.flag("/std:c11");
     } else {
-        // vgmstream's decoder mixes signed and unsigned comparisons.
-        build.flag("-std=c11").flag("-Wno-sign-compare");
+        build.flag("-std=c11");
     }
-    build.compile("sc1_vgmstream_decoder");
+    build.compile("sc1_vgmstream_adapter");
+
+    // All of vgmstream, without its optional external codecs, which Splinter
+    // Cell's sound maps don't use. It's third-party code, so its warnings are
+    // hidden, and it's optimized even in debug builds, where listing the
+    // sound maps would otherwise take several times longer.
+    let mut vgmstream = cc::Build::new();
+    vgmstream
+        .files(c_sources(&vgmstream_source))
+        .include(&vgmstream_source)
+        .include(vgmstream_source.join("../ext_includes"))
+        .opt_level(2)
+        .warnings(false);
+    if is_msvc {
+        vgmstream
+            .flag("/std:c11")
+            .define("_WIN32_WINNT", "0x501")
+            .define("_CRT_SECURE_NO_WARNINGS", None);
+    } else {
+        vgmstream.flag("-std=c11").flag("-w");
+    }
+    vgmstream.compile("vgmstream");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if !is_msvc && target_os != "macos" {
+        println!("cargo:rustc-link-lib=m");
+    }
 
     if env::var_os("CARGO_FEATURE_UELIB_BRIDGE").is_some() {
         build_uelib_bridge(&manifest_dir);
     }
+}
+
+/// The C files in `directory` and its subdirectories, sorted so builds are
+/// reproducible.
+fn c_sources(directory: &Path) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    let mut directories = vec![directory.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let entries = fs::read_dir(&directory).unwrap_or_else(|error| {
+            panic!("Could not read {}: {error}", directory.display());
+        });
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("Could not read {}: {error}", directory.display()))
+                .path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "c") {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+    sources
 }
 
 const WITHOUT_BRIDGE: &str =

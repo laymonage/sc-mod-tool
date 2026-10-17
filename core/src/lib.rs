@@ -1,7 +1,9 @@
 pub mod decoder;
 mod error;
 mod sound_keys;
+mod sound_maps;
 pub mod subtitles;
+mod vgmstream;
 
 pub use error::Error;
 
@@ -13,6 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use encoding_rs::WINDOWS_1252;
 
+use decoder::DecodedAudio;
+
 const BANK_HEADER_SIZE: usize = 0x30;
 const FRAME_HEADER_SIZE: usize = 0x34;
 const CODES_PER_FRAME: u32 = 1536;
@@ -23,15 +27,22 @@ pub struct Language {
     pub label: String,
 }
 
+/// A numeric `.LS0` bank of voice lines, or the sounds of one kind that a
+/// sound map lists for one area, such as `1_1_0Tbilisi`'s sound effects.
 #[derive(Clone, Debug)]
 pub struct Bank {
     pub name: String,
     /// The extra map whose folder holds the bank, such as `1_6_1_1kolacell`,
     /// or `None` for the language's own banks. Maps reuse bank names.
     pub map: Option<String>,
+    /// The sound map's area the bank's sounds are from, such as
+    /// `1_1_0Tbilisi`, or `None` for an `.LS0` bank.
+    pub area: Option<String>,
+    /// The `.LS0` bank or sound map, relative to `Sounds`.
     pub path: String,
     pub code: String,
     pub mission_name: Option<String>,
+    /// The size of the file at `path`.
     pub size: u64,
     pub issue: Option<String>,
     pub segments: Vec<Segment>,
@@ -40,15 +51,47 @@ pub struct Bank {
 #[derive(Clone, Debug)]
 pub struct Segment {
     pub id: String,
-    pub offset: u64,
-    /// The length of the stream itself. Banks pad streams to 4-byte
-    /// boundaries, and the padding isn't included.
-    pub byte_length: u64,
+    pub source: SegmentSource,
+    /// The sound's name in its map, such as `ROGEAR_2`, or `None` for a
+    /// stream in an `.LS0` bank.
+    pub name: Option<String>,
     pub sample_count: u32,
     pub sample_rate: u32,
     pub channels: u32,
-    pub codec: &'static str,
+    pub codec: String,
     pub segment: usize,
+}
+
+/// Where a segment's audio is in its bank's file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SegmentSource {
+    /// A stream found by scanning an `.LS0` bank.
+    Stream {
+        offset: u64,
+        /// The length of the stream itself. Banks pad streams to 4-byte
+        /// boundaries, and the padding isn't included.
+        byte_length: u64,
+    },
+    /// A sound in a sound map, which vgmstream finds by its number.
+    MapSound {
+        /// The sound's number in the map, from 1.
+        subsong: u32,
+        /// The map's key for the sound, such as `0x00130086`.
+        key: Option<u32>,
+    },
+}
+
+impl Segment {
+    /// The offset and length of a stream in an `.LS0` bank.
+    pub fn stream_range(&self) -> Option<(u64, u64)> {
+        match self.source {
+            SegmentSource::Stream {
+                offset,
+                byte_length,
+            } => Some((offset, byte_length)),
+            SegmentSource::MapSound { .. } => None,
+        }
+    }
 }
 
 pub fn discover_languages(root: &Path) -> Result<Vec<Language>, Error> {
@@ -116,8 +159,13 @@ pub fn discover_banks_with_progress(
     }
     folders.extend(map_language_folders(&sounds, language)?);
 
-    let mut files = Vec::new();
-    for folder in &folders {
+    /// A file to read banks from.
+    enum Source {
+        Bank(PathBuf, PathBuf),
+        SoundMap(String),
+    }
+    let mut sources = Vec::new();
+    for (folder_index, folder) in folders.iter().enumerate() {
         let mut folder_files = Vec::new();
         let absolute_path = safe_child_path(&sounds, &folder.relative_path)?;
         collect_banks(
@@ -125,64 +173,129 @@ pub fn discover_banks_with_progress(
             Path::new(&folder.relative_path),
             &mut folder_files,
         )?;
-        folder_files.sort_by(|left, right| {
-            left.1
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .cmp(&right.1.to_string_lossy().to_ascii_lowercase())
-        });
-        files.extend(
+        sources.extend(
             folder_files
                 .into_iter()
-                .map(|(absolute, relative)| (absolute, relative, folder.map.clone())),
+                .map(|(absolute, relative)| (folder_index, Source::Bank(absolute, relative))),
+        );
+        sources.extend(
+            sound_maps::map_files(&sounds, folder.map.as_deref(), &folder.relative_path)
+                .into_iter()
+                .map(|path| (folder_index, Source::SoundMap(path))),
         );
     }
 
-    let mut banks = Vec::with_capacity(files.len());
-    let total = files.len();
-    let names = mission_names(&sounds, language);
+    let mut banks = Vec::new();
+    let total = sources.len();
     progress(0, total, "");
-    for (index, (absolute_path, relative_path, map)) in files.into_iter().enumerate() {
+    for (index, (folder_index, source)) in sources.into_iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        let bytes = fs::read(&absolute_path)
-            .map_err(|error| format!("Could not read {}: {error}", absolute_path.display()))?;
-        let name = absolute_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| format!("Bank path is not valid UTF-8: {}", absolute_path.display()))?
-            .to_owned();
-        let code = mission_code(&name).unwrap_or_default();
-        // Extra maps reuse bank names from other missions, so their mission is
-        // the map's, not the bank file's. The map folder name
-        // (`1_7_1_1VselkaInfiltration`) starts with its mission code.
-        let mission_name = match &map {
-            Some(map) => {
-                leading_mission_code(map).and_then(|map_code| names.get(&map_code).cloned())
+        let map = folders[folder_index].map.as_deref();
+        let name = match source {
+            Source::Bank(absolute_path, relative_path) => {
+                let bank = read_bank(&absolute_path, &relative_path, map, cancelled)?;
+                let name = bank.name.clone();
+                banks.push((folder_index, 0, bank));
+                name
             }
-            None => mission_name(&names, &code),
+            Source::SoundMap(path) => {
+                for (kind, bank) in sound_maps::read_map_banks(&sounds, &path, map, cancelled)? {
+                    let rank = kind.map_or(u8::MAX, |kind| kind as u8 + 1);
+                    banks.push((folder_index, rank, bank));
+                }
+                path
+            }
         };
-        let path = relative_path.to_string_lossy().replace('\\', "/");
-        let segments = scan_bank(&bytes, &path, cancelled)?;
-        let issue = if segments.is_empty() {
-            Some(diagnose_unrecognized_bank(&bytes))
-        } else {
-            None
-        };
-        banks.push(Bank {
-            name,
-            map,
-            path,
-            code,
-            mission_name,
-            size: bytes.len() as u64,
-            issue,
-            segments,
-        });
-        progress(index + 1, total, &banks[index].name);
+        progress(index + 1, total, &name);
     }
-    Ok(banks)
+    // Banks are listed by folder, then by mission code, so a level's voice
+    // lines come before its map sounds. Banks without a code, such as the
+    // maps' `fix` and `menu` areas, go last.
+    banks.sort_by_cached_key(|(folder_index, rank, bank)| {
+        let code: Option<Vec<u32>> = bank.code.split('_').map(|part| part.parse().ok()).collect();
+        (
+            *folder_index,
+            code.unwrap_or_else(|| vec![u32::MAX]),
+            *rank,
+            bank.name.to_ascii_lowercase(),
+        )
+    });
+
+    let names = mission_names(&sounds, language);
+    Ok(banks
+        .into_iter()
+        .map(|(_, _, mut bank)| {
+            // Extra maps reuse bank names from other missions, so their
+            // mission is the map's, not the bank file's. The map folder name
+            // (`1_7_1_1VselkaInfiltration`) starts with its mission code.
+            bank.mission_name = match &bank.map {
+                Some(map) => {
+                    leading_mission_code(map).and_then(|map_code| names.get(&map_code).cloned())
+                }
+                None => mission_name(&names, &bank.code),
+            };
+            bank
+        })
+        .collect())
+}
+
+/// Scans the `.LS0` bank at `absolute_path` for streams.
+fn read_bank(
+    absolute_path: &Path,
+    relative_path: &Path,
+    map: Option<&str>,
+    cancelled: &AtomicBool,
+) -> Result<Bank, Error> {
+    let bytes = fs::read(absolute_path)
+        .map_err(|error| format!("Could not read {}: {error}", absolute_path.display()))?;
+    let name = absolute_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("Bank path is not valid UTF-8: {}", absolute_path.display()))?
+        .to_owned();
+    let path = relative_path.to_string_lossy().replace('\\', "/");
+    let segments = scan_bank(&bytes, &path, cancelled)?;
+    let issue = if segments.is_empty() {
+        Some(diagnose_unrecognized_bank(&bytes))
+    } else {
+        None
+    };
+    Ok(Bank {
+        code: mission_code(&name).unwrap_or_default(),
+        name,
+        map: map.map(str::to_owned),
+        area: None,
+        path,
+        mission_name: None,
+        size: bytes.len() as u64,
+        issue,
+        segments,
+    })
+}
+
+/// Reads and decodes `segment`, from the bank or sound map at `bank_path`
+/// under the game's `Sounds` folder.
+pub fn decode_segment(
+    root: &Path,
+    bank_path: &str,
+    segment: &Segment,
+    cancelled: &AtomicBool,
+) -> Result<DecodedAudio, Error> {
+    match segment.source {
+        SegmentSource::Stream {
+            offset,
+            byte_length,
+        } => {
+            let bytes = read_segment_with_cancel(root, bank_path, offset, byte_length, cancelled)?;
+            decoder::decode(&bytes, segment.sample_count, cancelled)
+        }
+        SegmentSource::MapSound { subsong, .. } => {
+            let sounds = find_sounds_directory(root)?;
+            decoder::decode_map_sound(&sounds, bank_path, subsong, cancelled)
+        }
+    }
 }
 
 pub fn read_segment(
@@ -642,8 +755,11 @@ fn scan_bank(bytes: &[u8], bank_path: &str, cancelled: &AtomicBool) -> Result<Ve
 
         segments.push(Segment {
             id: format!("{bank_path}:{offset}"),
-            offset: offset as u64,
-            byte_length: byte_length as u64,
+            source: SegmentSource::Stream {
+                offset: offset as u64,
+                byte_length: byte_length as u64,
+            },
+            name: None,
             sample_count,
             sample_rate: if sample_rate == 0 { 36000 } else { sample_rate },
             channels,
@@ -651,7 +767,8 @@ fn scan_bank(bytes: &[u8], bank_path: &str, cancelled: &AtomicBool) -> Result<Ve
                 "Ubisoft ADPCM 6-bit"
             } else {
                 "Ubisoft ADPCM 4-bit"
-            },
+            }
+            .to_owned(),
             segment: segments.len(),
         });
         offset = frame_offset;
@@ -728,14 +845,12 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let segments = scan_bank(&bytes, "ENGLISH/1_2.LS0", &cancelled).unwrap();
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].offset, 0);
+        assert_eq!(segments[0].stream_range(), Some((0, 103)));
         assert_eq!(segments[0].id, "ENGLISH/1_2.LS0:0");
-        assert_eq!(segments[0].byte_length, 103);
         assert_eq!(segments[0].sample_count, 4);
         assert_eq!(segments[0].sample_rate, 36000);
         assert_eq!(segments[0].channels, 1);
-        assert_eq!(segments[1].offset, 108);
-        assert_eq!(segments[1].byte_length, 103);
+        assert_eq!(segments[1].stream_range(), Some((108, 103)));
     }
 
     #[test]
@@ -802,7 +917,7 @@ mod tests {
         assert_eq!(supported.path, "ENGLISH/1_1_0.LS0");
         assert_eq!(supported.issue, None);
         assert_eq!(supported.segments.len(), 1);
-        assert_eq!(supported.segments[0].offset, 0);
+        assert_eq!(supported.segments[0].stream_range(), Some((0, 103)));
         let unsupported = banks.iter().find(|bank| bank.name == "2_2.LS0").unwrap();
         assert!(unsupported.segments.is_empty());
         assert!(
@@ -935,13 +1050,15 @@ mod tests {
             "1_6_1_1kolacell/Italien/3_4_2.LS0:0"
         );
         assert_eq!(banks[1].segments[0].codec, "Ubisoft ADPCM 6-bit");
-        read_segment(
+        let cancelled = AtomicBool::new(false);
+        let decoded = decode_segment(
             game.path(),
             &banks[1].path,
-            0,
-            banks[1].segments[0].byte_length,
+            &banks[1].segments[0],
+            &cancelled,
         )
         .unwrap();
+        assert_eq!(decoded.samples.len(), 4);
     }
 
     #[test]

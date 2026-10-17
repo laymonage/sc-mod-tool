@@ -1,28 +1,12 @@
+use std::collections::HashMap;
 use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use sc_mod_tool_core::{
-    decoder::decode,
-    discover_banks, discover_languages,
+    decode_segment, discover_banks, discover_languages,
     subtitles::{MappingConfidence, load_verified_subtitles},
 };
-
-fn sounds_directory(game_root: &Path) -> PathBuf {
-    if game_root
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("sounds"))
-    {
-        return game_root.to_path_buf();
-    }
-
-    ["Sounds", "sounds"]
-        .iter()
-        .map(|name| game_root.join(name))
-        .find(|path| path.is_dir())
-        .unwrap_or_else(|| panic!("No Sounds directory found under {}", game_root.display()))
-}
 
 #[test]
 #[ignore = "requires local Splinter Cell game files; set SC1_GAME_DIR"]
@@ -39,13 +23,13 @@ fn decodes_every_discovered_game_segment() {
         "Game directory not found at {}. Set SC1_GAME_DIR to override the default.",
         game_root.display()
     );
-    let sounds = sounds_directory(&game_root);
     let languages = discover_languages(&game_root)
         .unwrap_or_else(|error| panic!("Could not discover game languages: {error}"));
     let cancelled = AtomicBool::new(false);
     let mut compiled_links = None;
     let mut total_banks = 0;
     let mut total_segments = 0;
+    let mut map_languages = HashMap::new();
 
     for language in languages {
         let banks = discover_banks(&game_root, &language.directory)
@@ -176,43 +160,34 @@ fn decodes_every_discovered_game_segment() {
         let mut language_segments = 0;
 
         for bank in banks.iter().filter(|bank| !bank.segments.is_empty()) {
-            let bank_path = sounds.join(&bank.path);
-            let bytes = fs::read(&bank_path)
-                .unwrap_or_else(|error| panic!("Could not read {}: {error}", bank_path.display()));
+            // Every language lists the sounds in the shared `MAPS.SM0`, so
+            // they're decoded with the first.
+            let first_language = map_languages
+                .entry(bank.path.clone())
+                .or_insert_with(|| language.directory.clone());
+            if *first_language != language.directory {
+                continue;
+            }
             language_banks += 1;
 
             for segment in &bank.segments {
-                let start = usize::try_from(segment.offset).unwrap_or_else(|_| {
-                    panic!(
-                        "{} at offset {}: segment offset does not fit in memory",
-                        segment.id, segment.offset
-                    )
-                });
-                let length = usize::try_from(segment.byte_length).unwrap_or_else(|_| {
-                    panic!("{}: segment length does not fit in memory", segment.id)
-                });
-                let end = start
-                    .checked_add(length)
-                    .unwrap_or_else(|| panic!("{}: segment byte range overflows", segment.id));
-                let input = bytes.get(start..end).unwrap_or_else(|| {
-                    panic!(
-                        "{}: segment range {start}..{end} exceeds {} bytes",
-                        segment.id,
-                        bytes.len()
-                    )
-                });
-                let decoded = decode(input, segment.sample_count, &cancelled)
+                let decoded = decode_segment(&game_root, &bank.path, segment, &cancelled)
                     .unwrap_or_else(|error| panic!("{}: {error}", segment.id));
-
+                let channels = segment.channels.min(2) as usize;
+                assert_eq!(
+                    decoded.channels as usize, channels,
+                    "{}: decoded channels differ from the listed ones",
+                    segment.id
+                );
                 assert_eq!(
                     decoded.samples.len(),
-                    segment.sample_count as usize,
-                    "{}: decoded sample count differs from scanner metadata",
+                    segment.sample_count as usize * channels,
+                    "{}: decoded sample count differs from the listed one",
                     segment.id
                 );
                 assert_eq!(
                     decoded.sample_rate, segment.sample_rate,
-                    "{}: decoded sample rate differs from scanner metadata",
+                    "{}: decoded sample rate differs from the listed one",
                     segment.id
                 );
                 language_segments += 1;

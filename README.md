@@ -1,9 +1,11 @@
 # SC Mod Tool
 
 A read-only browser for Splinter Cell 1 sound banks, built with Rust and egui.
-It lists the mono 4-bit and 6-bit Ubisoft ADPCM segments in each numeric `.LS0` bank,
-plays them with vgmstream's decoder, and shows their subtitles. Game files are
-never modified.
+It lists the mono 4-bit and 6-bit Ubisoft ADPCM segments in each numeric `.LS0` bank
+and shows their subtitles. It also lists the sound effects, character voices,
+music and streams in the game's sound maps (`MAPS.SM0` and each language's
+`MAPS.LM0`), by level. vgmstream decodes everything. Game files are never
+modified.
 
 Subtitles come from the game's compiled UnrealScript and localization files,
 matched to segments through `.uax` sound keys and `MAPS.LM0`. This includes

@@ -1,7 +1,9 @@
 use std::ffi::{c_int, c_void};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::Error;
+use crate::vgmstream::Vgmstream;
 
 unsafe extern "C" {
     fn decode_sc1_ubi_adpcm(
@@ -26,8 +28,11 @@ unsafe extern "C" fn check_cancelled(context: *mut c_void) -> c_int {
 
 #[derive(Debug)]
 pub struct DecodedAudio {
+    /// Interleaved samples.
     pub samples: Vec<i16>,
     pub sample_rate: u32,
+    /// One or two.
+    pub channels: u16,
 }
 
 pub fn decode(
@@ -75,7 +80,66 @@ pub fn decode(
     Ok(DecodedAudio {
         samples,
         sample_rate,
+        channels: 1,
     })
+}
+
+/// Decodes sound `subsong` of the sound map at `map_path` under `sounds`,
+/// which must be canonical.
+pub(crate) fn decode_map_sound(
+    sounds: &Path,
+    map_path: &str,
+    subsong: u32,
+    cancelled: &AtomicBool,
+) -> Result<DecodedAudio, Error> {
+    let mut vgmstream = Vgmstream::new()?;
+    vgmstream.open(sounds, map_path, subsong)?;
+    let sound = vgmstream.decode(cancelled)?;
+    let (samples, channels) = if sound.channels > 2 {
+        (mix_layers(&sound.samples, sound.channels as usize), 2)
+    } else {
+        (sound.samples, sound.channels as u16)
+    };
+    if samples.is_empty() {
+        return Err("The sound has no audio samples.".into());
+    }
+    Ok(DecodedAudio {
+        samples,
+        sample_rate: sound.sample_rate,
+        channels,
+    })
+}
+
+/// Mixes a sound in stereo layers, such as the three in `STREAM.SS0`'s
+/// sounds, into one stereo pair, scaled down if the sum would clip.
+fn mix_layers(samples: &[i16], channels: usize) -> Vec<i16> {
+    let mixed: Vec<i32> = samples
+        .chunks_exact(channels)
+        .flat_map(|frame| {
+            let mut pair = [0_i32; 2];
+            for (channel, sample) in frame.iter().enumerate() {
+                pair[channel % 2] += i32::from(*sample);
+            }
+            pair
+        })
+        .collect();
+    let peak = mixed
+        .iter()
+        .map(|sample| sample.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    let limit = i16::MAX as u32;
+    mixed
+        .into_iter()
+        .map(|sample| {
+            let sample = if peak > limit {
+                (i64::from(sample) * i64::from(limit) / i64::from(peak)) as i32
+            } else {
+                sample
+            };
+            sample as i16
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -106,6 +170,18 @@ mod tests {
     fn rejects_streams_outside_the_supported_shape() {
         let cancelled = AtomicBool::new(false);
         assert!(decode(&[0; 32], 4, &cancelled).is_err());
+    }
+
+    #[test]
+    fn mixes_stereo_layers_without_clipping() {
+        // Two frames of three stereo layers.
+        let quiet = [1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6];
+        assert_eq!(mix_layers(&quiet, 6), [9, 12, -9, -12]);
+
+        let loud = [i16::MAX, 0, i16::MAX, 0, 0, 0, 100, 0, 0, 0, 0, 0];
+        let mixed = mix_layers(&loud, 6);
+        assert_eq!(mixed[0], i16::MAX);
+        assert_eq!(mixed[2], 50);
     }
 
     #[test]

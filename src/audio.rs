@@ -47,7 +47,11 @@ impl AudioOutput {
             }
         };
         let sink = Sink::try_new(&stream.handle).map_err(|error| error.to_string())?;
-        sink.append(SamplesBuffer::new(1, audio.sample_rate, audio.samples));
+        sink.append(SamplesBuffer::new(
+            audio.channels,
+            audio.sample_rate,
+            audio.samples,
+        ));
         Ok(ActivePlayback { sink, segment_id })
     }
 }
