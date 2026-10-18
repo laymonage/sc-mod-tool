@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::missions::{leading_mission_code, mission_code};
+use crate::sounds_folder::find_file;
 use crate::vgmstream::{SoundInfo, Vgmstream};
 use crate::{Bank, Error, Segment, SegmentSource};
 
@@ -21,7 +23,7 @@ pub(crate) fn map_files(sounds: &Path, map: Option<&str>, language_folder: &str)
     [(shared_folder, "MAPS.SM0"), (language_folder, "MAPS.LM0")]
         .into_iter()
         .filter_map(|(folder, file_name)| {
-            let path = crate::find_file(&sounds.join(folder), file_name).ok()?;
+            let path = find_file(&sounds.join(folder), file_name).ok()?;
             let name = path.file_name()?.to_str()?;
             Some(if folder.is_empty() {
                 name.to_owned()
@@ -122,7 +124,7 @@ pub(crate) fn read_map_banks(
     let mut banks: Vec<_> = banks
         .into_iter()
         .map(|((area, kind), segments)| {
-            let code = crate::leading_mission_code(&area).unwrap_or_default();
+            let code = leading_mission_code(&area).unwrap_or_default();
             let prefix = if code.is_empty() { &area } else { &code };
             let bank = Bank {
                 name: format!("{prefix} {}", kind.label()),
@@ -239,7 +241,7 @@ impl<'a> MapEntry<'a> {
     /// numeric `.LS0` bank.
     fn kind(&self, is_localized: bool, info: &SoundInfo) -> Option<SoundKind> {
         if let Some(file) = self.stream_file() {
-            return if crate::mission_code(file).is_some() {
+            return if mission_code(file).is_some() {
                 None
             } else if file
                 .get(..6)

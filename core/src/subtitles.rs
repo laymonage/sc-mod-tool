@@ -2,6 +2,7 @@ mod alignment;
 mod bridge;
 pub(crate) mod localization;
 pub(crate) mod map;
+mod sound_keys;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -11,12 +12,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use encoding_rs::WINDOWS_1252;
 
-use crate::sound_keys::{self, KeyCorrections, PackageKeys};
-use crate::{Error, find_file};
+use crate::Error;
+use crate::sounds_folder::{
+    LanguageFolder, find_file, find_sounds_directory, known_language, map_language_folders,
+    safe_child_path,
+};
 use alignment::match_unshown_subtitles;
 use bridge::{BridgeLink, BridgePattern, scan_compiled_links};
 use localization::{find_cue, line_text, localization_path, localization_sections};
 use map::{SoundMap, mark_foreign_packages, parse_map_records, resolve_segments};
+use sound_keys::{KeyCorrections, PackageKeys};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MappingConfidence {
@@ -105,28 +110,28 @@ pub fn load_verified_subtitles(
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
-    let extension = super::known_language(language)
+    let extension = known_language(language)
         .ok_or_else(|| {
             format!("Subtitle localization extension is not known for language {language}.")
         })?
         .localization_extension;
 
-    let sounds = super::find_sounds_directory(root)?;
+    let sounds = find_sounds_directory(root)?;
     let game_root = sounds.parent().ok_or_else(|| {
         format!(
             "Could not find the game directory above {}.",
             sounds.display()
         )
     })?;
-    let mut folders = vec![super::LanguageFolder {
+    let mut folders = vec![LanguageFolder {
         map: None,
         relative_path: language.to_owned(),
     }];
-    folders.extend(super::map_language_folders(&sounds, language)?);
+    folders.extend(map_language_folders(&sounds, language)?);
     let mut maps = Vec::with_capacity(folders.len());
     for folder in folders {
         let map_path = find_file(
-            &super::safe_child_path(&sounds, &folder.relative_path)?,
+            &safe_child_path(&sounds, &folder.relative_path)?,
             "MAPS.LM0",
         )?;
         let map_data = fs::read(&map_path)

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use super::bridge::{BridgeCall, BridgePattern};
 use super::localization::line_text;
 use super::map::{SoundMap, clip_seconds, resolve_segments};
+use super::sound_keys::KeyCorrections;
 use super::{MappingConfidence, Subtitle, SubtitleAnalysis, add_subtitle, push_warning};
-use crate::sound_keys::KeyCorrections;
 
 /// Matches the sounds a pattern plays without a subtitle to the lines of the
 /// localization section named after the pattern, by position.

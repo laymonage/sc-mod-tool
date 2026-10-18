@@ -16,8 +16,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::find_file;
-use crate::subtitles::map::parse_map_records;
+use super::map::parse_map_records;
+use crate::sounds_folder::{find_file, map_language_folders};
 
 /// How far apart, in seconds, a lip-sync duration and a clip can be to match.
 const DURATION_TOLERANCE: f64 = 0.15;
@@ -123,7 +123,7 @@ pub(crate) fn correct(
     };
     // Extra maps have the only copies of some packages' audio, such as
     // mission 3's.
-    for folder in crate::map_language_folders(sounds, "ENGLISH").unwrap_or_default() {
+    for folder in map_language_folders(sounds, "ENGLISH").unwrap_or_default() {
         for (key, seconds) in
             map_clip_durations(&sounds.join(&folder.relative_path)).unwrap_or_default()
         {

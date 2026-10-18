@@ -7,8 +7,8 @@ use std::sync::{Mutex, PoisonError, atomic::Ordering};
 
 use serde::Deserialize;
 
+use super::sound_keys;
 use crate::Error;
-use crate::sound_keys;
 
 #[cfg(feature = "uelib-bridge")]
 const BRIDGE_OUTPUT_CAPACITY: usize = 16 * 1024 * 1024;

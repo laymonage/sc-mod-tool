@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::push_warning;
-use crate::sound_keys::PackageKeys;
+use super::sound_keys::PackageKeys;
 
 /// The bytes holding the fields every record needs. Records are 128 bytes, but
 /// the sample rate and bank name after these are optional.

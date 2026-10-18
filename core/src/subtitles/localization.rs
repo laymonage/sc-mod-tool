@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use encoding_rs::WINDOWS_1252;
 
-use crate::find_file;
+use crate::sounds_folder::find_file;
 
 /// A localization line's text, or `None` for a line without text: the game's
 /// files use `(null)` for those.
