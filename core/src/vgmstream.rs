@@ -4,14 +4,11 @@
 //! vgmstream opens files through callbacks here, by names relative to
 //! `Sounds`, so it can't read outside that folder.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::Error;
@@ -101,6 +98,7 @@ unsafe extern "C" {
         subsong: c_int,
     ) -> c_int;
     fn libvgmstream_render(lib: *mut LibVgmstream) -> c_int;
+    fn libstreamfile_open_buffered(inner: *mut LibStreamFile) -> *mut LibStreamFile;
     fn libstreamfile_close(libsf: *mut LibStreamFile);
 }
 
@@ -129,17 +127,13 @@ pub(crate) struct DecodedSound {
 /// without looping.
 pub(crate) struct Vgmstream {
     lib: NonNull<LibVgmstream>,
-    cache: Rc<RefCell<BlockCache>>,
 }
 
 impl Vgmstream {
     pub(crate) fn new() -> Result<Self, String> {
         let lib = NonNull::new(unsafe { libvgmstream_init() })
             .ok_or_else(|| "Could not start vgmstream.".to_owned())?;
-        Ok(Self {
-            lib,
-            cache: Rc::default(),
-        })
+        Ok(Self { lib })
     }
 
     /// Opens sound `subsong` (from 1) of the file at `relative_path` under
@@ -152,7 +146,11 @@ impl Vgmstream {
     ) -> Result<SoundInfo, String> {
         let subsong =
             c_int::try_from(subsong).map_err(|_| format!("Sound {subsong} is out of range."))?;
-        let file = SoundFile::open(sounds, relative_path, &self.cache)
+        // vgmstream makes many small reads, so they're buffered. Files it
+        // opens from this one are buffered too.
+        let file = SoundFile::open(sounds, relative_path)
+            .map(|file| unsafe { libstreamfile_open_buffered(file) })
+            .filter(|file| !file.is_null())
             .ok_or_else(|| format!("Could not open {relative_path}."))?;
 
         let mut config = Config {
@@ -250,70 +248,22 @@ fn c_string(characters: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// The size of the blocks files are read in. vgmstream makes many small
-/// reads.
-const BLOCK_SIZE: u64 = 0x8000;
-/// How many blocks a [`BlockCache`] keeps: 32 MiB.
-const CACHED_BLOCKS: usize = 1024;
-
-/// The blocks of files vgmstream has read, shared by every file one
-/// [`Vgmstream`] opens. vgmstream reopens a sound map for each sound it opens
-/// and reads its index again, so this saves most of the reading when listing a
-/// map's sounds.
-#[derive(Default)]
-struct BlockCache {
-    files: HashMap<PathBuf, HashMap<u64, Rc<[u8]>>>,
-    /// The cached blocks, oldest first.
-    order: VecDeque<(PathBuf, u64)>,
-}
-
-impl BlockCache {
-    fn get(&self, path: &Path, index: u64) -> Option<Rc<[u8]>> {
-        self.files.get(path)?.get(&index).cloned()
-    }
-
-    fn insert(&mut self, path: &Path, index: u64, block: Rc<[u8]>) {
-        if self.order.len() == CACHED_BLOCKS
-            && let Some((oldest_path, oldest_index)) = self.order.pop_front()
-            && let Some(blocks) = self.files.get_mut(&oldest_path)
-        {
-            blocks.remove(&oldest_index);
-        }
-        self.files
-            .entry(path.to_path_buf())
-            .or_default()
-            .insert(index, block);
-        self.order.push_back((path.to_path_buf(), index));
-    }
-}
-
 /// A file under `Sounds` that vgmstream reads. `api` comes first, so vgmstream's
 /// pointer to it is also a pointer to the whole struct.
-///
-/// vgmstream's own `libstreamfile_open_buffered` isn't used, because it
-/// returns data from the previous read's offset rather than the requested one.
 #[repr(C)]
 struct SoundFile {
     api: LibStreamFile,
     sounds: PathBuf,
-    path: PathBuf,
     /// The path relative to `Sounds`, with `/` separators.
     name: CString,
     file: File,
     size: i64,
-    cache: Rc<RefCell<BlockCache>>,
-    /// The block read last, and its index.
-    block: Option<(u64, Rc<[u8]>)>,
 }
 
 impl SoundFile {
     /// Opens `relative_path` under `sounds`, returning a pointer vgmstream
     /// owns.
-    fn open(
-        sounds: &Path,
-        relative_path: &str,
-        cache: &Rc<RefCell<BlockCache>>,
-    ) -> Option<*mut LibStreamFile> {
+    fn open(sounds: &Path, relative_path: &str) -> Option<*mut LibStreamFile> {
         let (path, name) = resolve_sound_path(sounds, relative_path)?;
         let file = File::open(&path).ok()?;
         let size = i64::try_from(file.metadata().ok()?.len()).ok()?;
@@ -327,12 +277,9 @@ impl SoundFile {
                 close: sound_file_close,
             },
             sounds: sounds.to_path_buf(),
-            path,
             name: CString::new(name).ok()?,
             file,
             size,
-            cache: Rc::clone(cache),
-            block: None,
         });
         let pointer = Box::into_raw(sound_file);
         unsafe { (*pointer).api.user_data = pointer.cast() };
@@ -342,65 +289,19 @@ impl SoundFile {
     /// Reads into `destination` from `offset`, returning how many bytes were
     /// read, which is fewer at the end of the file or on an error.
     fn read_at(&mut self, offset: u64, destination: &mut [u8]) -> usize {
-        // vgmstream mostly reads a few bytes at a time from the last block.
-        if let Some((index, block)) = &self.block {
-            let start = offset.wrapping_sub(index * BLOCK_SIZE);
-            if start < block.len() as u64 && destination.len() as u64 <= block.len() as u64 - start
-            {
-                let start = start as usize;
-                destination.copy_from_slice(&block[start..start + destination.len()]);
-                return destination.len();
-            }
+        if self.file.seek(SeekFrom::Start(offset)).is_err() {
+            return 0;
         }
-
         let mut read = 0;
         while read < destination.len() {
-            let position = offset + read as u64;
-            let index = position / BLOCK_SIZE;
-            let Some(block) = self.read_block(index) else {
-                break;
-            };
-            let start = (position - index * BLOCK_SIZE) as usize;
-            if start >= block.len() {
-                break;
+            match self.file.read(&mut destination[read..]) {
+                Ok(0) => break,
+                Ok(count) => read += count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
             }
-            let count = (block.len() - start).min(destination.len() - read);
-            destination[read..read + count].copy_from_slice(&block[start..start + count]);
-            read += count;
         }
         read
-    }
-
-    /// The block at `index`, or `None` past the end of the file or on an
-    /// error.
-    fn read_block(&mut self, index: u64) -> Option<Rc<[u8]>> {
-        if let Some((current, block)) = &self.block
-            && *current == index
-        {
-            return Some(Rc::clone(block));
-        }
-        let cached = self.cache.borrow().get(&self.path, index);
-        let block = match cached {
-            Some(block) => block,
-            None => {
-                self.file.seek(SeekFrom::Start(index * BLOCK_SIZE)).ok()?;
-                let mut bytes = Vec::new();
-                (&mut self.file)
-                    .take(BLOCK_SIZE)
-                    .read_to_end(&mut bytes)
-                    .ok()?;
-                if bytes.is_empty() {
-                    return None;
-                }
-                let block: Rc<[u8]> = bytes.into();
-                self.cache
-                    .borrow_mut()
-                    .insert(&self.path, index, Rc::clone(&block));
-                block
-            }
-        };
-        self.block = Some((index, Rc::clone(&block)));
-        Some(block)
     }
 }
 
@@ -440,7 +341,7 @@ unsafe extern "C" fn sound_file_open(
     let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
         return std::ptr::null_mut();
     };
-    SoundFile::open(&sound_file.sounds, name, &sound_file.cache).unwrap_or(std::ptr::null_mut())
+    SoundFile::open(&sound_file.sounds, name).unwrap_or(std::ptr::null_mut())
 }
 
 unsafe extern "C" fn sound_file_close(libsf: *mut LibStreamFile) {
@@ -543,12 +444,14 @@ mod tests {
     #[test]
     fn reads_files_at_any_offset() {
         let game = tempfile::tempdir().unwrap();
-        let block = BLOCK_SIZE as usize;
+        // vgmstream's buffer is 0x8000 bytes.
+        let block = 0x8000;
         let bytes: Vec<u8> = (0..block * 2 + 10).map(|index| index as u8).collect();
         fs::write(game.path().join("MAPS.SM0"), &bytes).unwrap();
         let sounds = game.path().canonicalize().unwrap();
 
-        let file = SoundFile::open(&sounds, "MAPS.SM0", &Rc::default()).unwrap();
+        let file = SoundFile::open(&sounds, "MAPS.SM0").unwrap();
+        let file = unsafe { libstreamfile_open_buffered(file) };
         let read = |offset: usize, length: usize| {
             let mut destination = vec![0; length];
             let count = unsafe {
