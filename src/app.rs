@@ -497,7 +497,7 @@ impl SCModToolApp {
         let count = |is_map: bool| -> usize {
             self.banks
                 .iter()
-                .filter(|bank| bank.area.is_some() == is_map)
+                .filter(|bank| bank.sound_kind.is_some() == is_map)
                 .map(|bank| bank.segments.len())
                 .sum()
         };

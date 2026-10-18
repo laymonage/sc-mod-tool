@@ -62,7 +62,7 @@ pub(super) fn read_bank(
         code: mission_code(&name).unwrap_or_default(),
         name,
         map: map.map(str::to_owned),
-        area: None,
+        sound_kind: None,
         path,
         mission_name: None,
         size: bytes.len() as u64,

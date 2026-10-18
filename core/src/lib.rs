@@ -5,7 +5,7 @@ mod sounds_folder;
 pub mod subtitles;
 mod vgmstream;
 
-pub use banks::{discover_banks, discover_banks_with_progress, discover_languages};
+pub use banks::{SoundKind, discover_banks, discover_banks_with_progress, discover_languages};
 pub use error::Error;
 
 use std::fs;
@@ -22,17 +22,17 @@ pub struct Language {
     pub label: String,
 }
 
-/// A numeric `.LS0` bank of voice lines, or the sounds of one kind that a
-/// sound map lists for one area, such as `1_1_0Tbilisi`'s sound effects.
+/// A numeric `.LS0` bank of voice lines, or a sound map's sounds of one kind,
+/// such as `MAPS.SM0`'s sound effects.
 #[derive(Clone, Debug)]
 pub struct Bank {
     pub name: String,
     /// The extra map whose folder holds the bank, such as `1_6_1_1kolacell`,
     /// or `None` for the language's own banks. Maps reuse bank names.
     pub map: Option<String>,
-    /// The sound map's area the bank's sounds are from, such as
-    /// `1_1_0Tbilisi`, or `None` for an `.LS0` bank.
-    pub area: Option<String>,
+    /// The kind of sounds a sound map's bank holds, or `None` for an `.LS0`
+    /// bank.
+    pub sound_kind: Option<SoundKind>,
     /// The `.LS0` bank or sound map, relative to `Sounds`.
     pub path: String,
     pub code: String,
@@ -73,6 +73,9 @@ pub enum SegmentSource {
         subsong: u32,
         /// The map's key for the sound, such as `0x00130086`.
         key: Option<u32>,
+        /// The map's areas that play the sound, such as `1_1_0Tbilisi`, one
+        /// for each level plus `fix` and `menu`.
+        areas: Vec<String>,
     },
 }
 

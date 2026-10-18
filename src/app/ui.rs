@@ -323,7 +323,7 @@ impl SCModToolApp {
             let mission = mission_label(bank)
                 .map(|mission| format!("{mission} · "))
                 .unwrap_or_default();
-            let contents = if bank.area.is_some() {
+            let contents = if bank.sound_kind.is_some() {
                 // A map's banks share its file, so its size isn't theirs.
                 format!("{} sounds · {}", bank.segments.len(), bank.path)
             } else {
@@ -360,10 +360,10 @@ impl SCModToolApp {
             ui.ctx().request_repaint();
         }
         // Map sounds have names, but no subtitles.
-        let is_map_bank = bank.area.is_some();
+        let is_map_bank = bank.sound_kind.is_some();
         ui.horizontal(|ui| {
             let hint = if is_map_bank {
-                "🔍 Search names"
+                "🔍 Search names, keys and levels"
             } else {
                 "🔍 Search subtitles and cues"
             };
@@ -414,7 +414,7 @@ impl SCModToolApp {
         }
 
         let titles = if is_map_bank {
-            ["", "#", "Duration", "Channels", "Key", "Name"]
+            ["", "#", "Duration", "Used in", "Key", "Name"]
         } else {
             ["", "#", "Duration", "Size", "Offset", "Subtitle"]
         };
@@ -454,9 +454,10 @@ impl SCModToolApp {
                         ui.label(format_duration(segment));
                     });
                     match segment.source {
-                        SegmentSource::MapSound { key, .. } => {
+                        SegmentSource::MapSound { key, ref areas, .. } => {
                             row.col(|ui| {
-                                ui.label(format_channels(segment.channels));
+                                ui.label(areas.len().to_string())
+                                    .on_hover_text("How many of the map's areas play it");
                             });
                             row.col(|ui| {
                                 ui.label(RichText::new(format_key(key)).monospace());
@@ -511,7 +512,7 @@ impl SCModToolApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(6.0);
-                        let noun = if bank.area.is_some() {
+                        let noun = if bank.sound_kind.is_some() {
                             "Sound"
                         } else {
                             "Segment"
@@ -561,7 +562,7 @@ impl SCModToolApp {
                                         );
                                         detail_row(ui, "Offset", offset.to_string());
                                     }
-                                    SegmentSource::MapSound { subsong, key } => {
+                                    SegmentSource::MapSound { subsong, key, .. } => {
                                         if let Some(name) = &segment.name {
                                             detail_row(ui, "Name", name.clone());
                                         }
@@ -572,8 +573,15 @@ impl SCModToolApp {
                                 detail_row(ui, "File", bank.path.clone());
                             });
 
-                        // Map sounds have no subtitles.
-                        if bank.area.is_some() {
+                        // Map sounds have no subtitles, but list where they're
+                        // played.
+                        if let SegmentSource::MapSound { areas, .. } = &segment.source {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.label(RichText::new("Used in").strong());
+                            for area in areas {
+                                ui.label(area);
+                            }
                             return;
                         }
                         ui.add_space(8.0);
@@ -625,17 +633,26 @@ impl SCModToolApp {
             return Vec::new();
         };
         let query = self.segment_filter.trim().to_lowercase();
-        if bank.area.is_some() {
-            // Map sounds have names instead of subtitles.
+        if bank.sound_kind.is_some() {
+            // Map sounds have names, keys and the areas that play them
+            // instead of subtitles.
             return bank
                 .segments
                 .iter()
                 .enumerate()
                 .filter(|(_, segment)| {
-                    segment
-                        .name
-                        .as_deref()
-                        .is_some_and(|name| name.to_lowercase().contains(&query))
+                    let SegmentSource::MapSound { key, areas, .. } = &segment.source else {
+                        return false;
+                    };
+                    query.is_empty()
+                        || segment
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| name.to_lowercase().contains(&query))
+                        || format_key(*key).to_lowercase().contains(&query)
+                        || areas
+                            .iter()
+                            .any(|area| area.to_lowercase().contains(&query))
                 })
                 .map(|(index, _)| index)
                 .collect();
@@ -825,9 +842,13 @@ fn segment_label(bank: &Bank, segment: &Segment) -> String {
 }
 
 /// The bank's mission name, or its extra map's folder when `HUD` doesn't name
-/// it.
+/// it. The main sound maps' banks, which every level shares, are grouped
+/// together.
 fn mission_label(bank: &Bank) -> Option<&str> {
-    bank.mission_name.as_deref().or(bank.map.as_deref())
+    bank.mission_name
+        .as_deref()
+        .or(bank.map.as_deref())
+        .or(bank.sound_kind.map(|_| "Sound maps"))
 }
 
 /// The bank's name, after its extra map's when it has one, since maps reuse

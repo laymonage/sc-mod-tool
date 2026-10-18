@@ -369,7 +369,7 @@ mod tests {
         vec![super::super::Bank {
             name: "1_1_2.LS0".to_owned(),
             map: None,
-            area: None,
+            sound_kind: None,
             path: "ENGLISH/1_1_2.LS0".to_owned(),
             code: "1_1_2".to_owned(),
             mission_name: Some("Police Station".to_owned()),

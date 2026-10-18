@@ -7,11 +7,11 @@
 //! file such as `Music_Common.SS0`, `STREAM.SS0` or a level's `.LS0` bank.
 //! The extra maps have their own `MAPS.SM0` and `MAPS.LM0`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::missions::{leading_mission_code, mission_code};
+use super::missions::mission_code;
 use crate::sounds_folder::find_file;
 use crate::vgmstream::{SoundInfo, Vgmstream};
 use crate::{Bank, Error, Segment, SegmentSource};
@@ -35,16 +35,15 @@ pub(crate) fn map_files(sounds: &Path, map: Option<&str>, language_folder: &str)
 }
 
 /// What a bank of map sounds holds, in the order banks are listed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SoundKind {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SoundKind {
     /// Short sounds stored in `MAPS.SM0`.
     Effects,
-    /// Short localized sounds stored in `MAPS.LM0`, mostly characters' barks.
+    /// Localized voices: characters' barks stored in `MAPS.LM0`, and
+    /// Lambert's alarm warnings and guards' alerts from `Music_*.LS0`.
     Voices,
     /// Music from `Music_*.SS0`, and the sequences that string it together.
     Music,
-    /// Music from each language's `Music_*.LS0`.
-    LocalizedMusic,
     /// Long streams from `STREAM.SS0` and other stream files, some of them
     /// in several stereo layers.
     Streams,
@@ -53,17 +52,16 @@ pub(crate) enum SoundKind {
 impl SoundKind {
     fn label(self) -> &'static str {
         match self {
-            SoundKind::Effects => "sound effects",
-            SoundKind::Voices => "voices",
-            SoundKind::Music => "music",
-            SoundKind::LocalizedMusic => "localized music",
-            SoundKind::Streams => "streams",
+            SoundKind::Effects => "Sound effects",
+            SoundKind::Voices => "Voices",
+            SoundKind::Music => "Music",
+            SoundKind::Streams => "Streams",
         }
     }
 }
 
-/// Lists the sounds in the map file at `path`, relative to `sounds`, as banks
-/// of one area's sounds of one kind. Sounds in numeric `.LS0` banks are left
+/// Lists the sounds in the map file at `path`, relative to `sounds`, as one
+/// bank for each kind, sorted by name. Sounds in numeric `.LS0` banks are left
 /// out, since those banks are scanned on their own. A bank of sounds that
 /// can't be read has no kind.
 pub(crate) fn read_map_banks(
@@ -71,7 +69,7 @@ pub(crate) fn read_map_banks(
     path: &str,
     map: Option<&str>,
     cancelled: &AtomicBool,
-) -> Result<Vec<(Option<SoundKind>, Bank)>, Error> {
+) -> Result<Vec<Bank>, Error> {
     let is_localized = path
         .rsplit_once('.')
         .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("LM0"));
@@ -80,7 +78,7 @@ pub(crate) fn read_map_banks(
     let unreadable = |issue: String| Bank {
         name: name.clone(),
         map: map.map(str::to_owned),
-        area: None,
+        sound_kind: None,
         path: path.to_owned(),
         code: String::new(),
         mission_name: None,
@@ -91,64 +89,118 @@ pub(crate) fn read_map_banks(
 
     let first = match Vgmstream::new()?.open(sounds, path, 1) {
         Ok(first) => first,
-        Err(error) => return Ok(vec![(None, unreadable(error))]),
+        Err(error) => return Ok(vec![unreadable(error)]),
     };
     let sound_count = first.subsong_count.max(1);
-    let mut banks = BTreeMap::<(String, SoundKind), Vec<Segment>>::new();
+    let mut lists = SoundLists::default();
     let mut failures = 0;
     for (subsong, info) in open_sounds(sounds, path, sound_count, cancelled)? {
-        let Some(info) = info else {
-            failures += 1;
-            continue;
-        };
+        match info {
+            Some(info) => lists.add(path, subsong, is_localized, info),
+            None => failures += 1,
+        }
+    }
+
+    let mut banks: Vec<_> = lists
+        .into_sorted()
+        .into_iter()
+        .map(|(kind, segments)| Bank {
+            name: kind.label().to_owned(),
+            map: map.map(str::to_owned),
+            sound_kind: Some(kind),
+            path: path.to_owned(),
+            code: String::new(),
+            mission_name: None,
+            size,
+            issue: None,
+            segments,
+        })
+        .collect();
+    if failures > 0 {
+        banks.push(unreadable(format!(
+            "vgmstream could not open {failures} of the {sound_count} sounds in this map."
+        )));
+    }
+    Ok(banks)
+}
+
+/// A map's sounds, in one list for each kind.
+///
+/// Each of the map's areas lists every sound it plays, so most sounds are
+/// listed by several areas. Entries with the same key, name and length are the
+/// same sound, so it's listed once, with every area that plays it.
+#[derive(Default)]
+struct SoundLists {
+    lists: BTreeMap<SoundKind, Vec<Segment>>,
+    /// Where each sound with a key is in its list.
+    listed: HashMap<(SoundKind, u32, String, u32), usize>,
+}
+
+impl SoundLists {
+    /// Adds sound `subsong` of the map at `path`, unless it's in a numeric
+    /// `.LS0` bank.
+    fn add(&mut self, path: &str, subsong: u32, is_localized: bool, info: SoundInfo) {
         let entry = MapEntry::parse(&info.stream_name);
         let Some(kind) = entry.kind(is_localized, &info) else {
-            continue;
+            return;
         };
-        let segments = banks.entry((entry.area.to_owned(), kind)).or_default();
+        let name = entry.display_name();
+        let segments = self.lists.entry(kind).or_default();
+        let identity = entry
+            .key
+            .map(|key| (kind, key, name.clone(), info.sample_count));
+        if let Some(index) = identity
+            .as_ref()
+            .and_then(|identity| self.listed.get(identity))
+        {
+            if let SegmentSource::MapSound { areas, .. } = &mut segments[*index].source
+                && !entry.area.is_empty()
+                && !areas.iter().any(|area| area == entry.area)
+            {
+                areas.push(entry.area.to_owned());
+            }
+            return;
+        }
+        if let Some(identity) = identity {
+            self.listed.insert(identity, segments.len());
+        }
         segments.push(Segment {
             id: format!("{path}#{subsong}"),
             source: SegmentSource::MapSound {
                 subsong,
                 key: entry.key,
+                areas: [entry.area]
+                    .into_iter()
+                    .filter(|area| !area.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
             },
-            name: Some(entry.display_name()),
+            name: Some(name),
             sample_count: info.sample_count,
             sample_rate: info.sample_rate,
             channels: info.channels,
             codec: info.codec,
-            segment: segments.len(),
+            segment: 0,
         });
     }
 
-    let mut banks: Vec<_> = banks
-        .into_iter()
-        .map(|((area, kind), segments)| {
-            let code = leading_mission_code(&area).unwrap_or_default();
-            let prefix = if code.is_empty() { &area } else { &code };
-            let bank = Bank {
-                name: format!("{prefix} {}", kind.label()),
-                map: map.map(str::to_owned),
-                area: Some(area.clone()),
-                path: path.to_owned(),
-                code,
-                mission_name: None,
-                size,
-                issue: None,
-                segments,
-            };
-            (Some(kind), bank)
-        })
-        .collect();
-    if failures > 0 {
-        banks.push((
-            None,
-            unreadable(format!(
-                "vgmstream could not open {failures} of the {sound_count} sounds in this map."
-            )),
-        ));
+    /// The lists, each sorted by name and numbered.
+    fn into_sorted(self) -> BTreeMap<SoundKind, Vec<Segment>> {
+        let mut lists = self.lists;
+        for segments in lists.values_mut() {
+            segments.sort_by_cached_key(|segment| {
+                let (key, subsong) = match segment.source {
+                    SegmentSource::MapSound { subsong, key, .. } => (key, subsong),
+                    SegmentSource::Stream { .. } => (None, 0),
+                };
+                (segment.name.as_deref().map(str::to_lowercase), key, subsong)
+            });
+            for (index, segment) in segments.iter_mut().enumerate() {
+                segment.segment = index;
+            }
+        }
+        lists
     }
-    Ok(banks)
 }
 
 /// Opens sounds 1 to `count` of the map at `path` to read their details,
@@ -243,15 +295,15 @@ impl<'a> MapEntry<'a> {
         if let Some(file) = self.stream_file() {
             return if mission_code(file).is_some() {
                 None
+            } else if is_localized {
+                // Despite their names, the `Music_*.LS0` banks hold Lambert's
+                // alarm warnings and guards' alerts.
+                Some(SoundKind::Voices)
             } else if file
                 .get(..6)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Music_"))
             {
-                Some(if is_localized {
-                    SoundKind::LocalizedMusic
-                } else {
-                    SoundKind::Music
-                })
+                Some(SoundKind::Music)
             } else {
                 Some(SoundKind::Streams)
             };
@@ -334,7 +386,7 @@ mod tests {
         );
         assert_eq!(
             kind("0_0_2_Training/0001/01-00660002/Music_Common.LS0", true, 1),
-            Some(SoundKind::LocalizedMusic)
+            Some(SoundKind::Voices)
         );
         assert_eq!(
             kind("0_0_2_Training/0000/0c-000500f6/single", false, 2),
@@ -352,6 +404,50 @@ mod tests {
             kind("0_0_2_Training/0001/01-00840001/0_0_2.LS0", true, 1),
             None
         );
+    }
+
+    #[test]
+    fn lists_each_sound_once_with_the_areas_that_play_it() {
+        let sound = |stream_name: &str, sample_count| SoundInfo {
+            sample_count,
+            stream_name: stream_name.to_owned(),
+            ..info(1)
+        };
+        let mut lists = SoundLists::default();
+        for (subsong, info) in [
+            sound("1_1_0Tbilisi/0001/01-001f0008/DOOJAM_1.wav", 100),
+            sound("1_1_0Tbilisi/0002/01-00050001/ALARM_1.wav", 50),
+            sound("1_1_1Tbilisi/0001/01-001f0008/DOOJAM_1.wav", 100),
+            // The same name and key, but a different length.
+            sound("1_1_1Tbilisi/0002/01-001f0008/DOOJAM_1.wav", 120),
+            sound("menu/0001/01-001f0008/DOOJAM_1.wav", 100),
+            sound("menu/0002/01-00660002/Music_Common.SS0", 100),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            lists.add("MAPS.SM0", subsong as u32 + 1, false, info);
+        }
+
+        let lists = lists.into_sorted();
+        let effects: Vec<_> = lists[&SoundKind::Effects]
+            .iter()
+            .map(|segment| {
+                let SegmentSource::MapSound { areas, .. } = &segment.source else {
+                    panic!("{} isn't a map sound", segment.id);
+                };
+                (segment.segment, segment.id.as_str(), areas.join(","))
+            })
+            .collect();
+        assert_eq!(
+            effects,
+            [
+                (0, "MAPS.SM0#2", "1_1_0Tbilisi".to_owned()),
+                (1, "MAPS.SM0#1", "1_1_0Tbilisi,1_1_1Tbilisi,menu".to_owned()),
+                (2, "MAPS.SM0#4", "1_1_1Tbilisi".to_owned()),
+            ]
+        );
+        assert_eq!(lists[&SoundKind::Music].len(), 1);
     }
 
     #[test]

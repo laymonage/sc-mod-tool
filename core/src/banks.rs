@@ -5,6 +5,8 @@ mod ls0;
 mod missions;
 mod sound_maps;
 
+pub use sound_maps::SoundKind;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -123,8 +125,8 @@ pub fn discover_banks_with_progress(
                 name
             }
             Source::SoundMap(path) => {
-                for (kind, bank) in sound_maps::read_map_banks(&sounds, &path, map, cancelled)? {
-                    let rank = kind.map_or(u8::MAX, |kind| kind as u8 + 1);
+                for bank in sound_maps::read_map_banks(&sounds, &path, map, cancelled)? {
+                    let rank = bank.sound_kind.map_or(u8::MAX, |kind| kind as u8 + 1);
                     banks.push((folder_index, rank, bank));
                 }
                 path
@@ -132,9 +134,8 @@ pub fn discover_banks_with_progress(
         };
         progress(index + 1, total, &name);
     }
-    // Banks are listed by folder, then by mission code, so a level's voice
-    // lines come before its map sounds. Banks without a code, such as the
-    // maps' `fix` and `menu` areas, go last.
+    // Banks are listed by folder, then by mission code. Sound maps' banks
+    // have no code, so they come after the folder's `.LS0` banks.
     banks.sort_by_cached_key(|(folder_index, rank, bank)| {
         let code: Option<Vec<u32>> = bank.code.split('_').map(|part| part.parse().ok()).collect();
         (
