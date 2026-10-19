@@ -178,7 +178,7 @@ impl SCModToolApp {
 
     fn open_root(&mut self, ctx: &egui::Context, root: PathBuf) {
         self.cancel_scan();
-        self.stop_playback();
+        self.clear_playback();
         self.scan_request = self.scan_request.wrapping_add(1);
         self.scan_cancel = None;
         self.scan_progress = None;
@@ -221,7 +221,7 @@ impl SCModToolApp {
         };
 
         self.cancel_scan();
-        self.stop_playback();
+        self.clear_playback();
         self.clear_banks();
         self.scan_progress = Some(ScanProgress::Banks {
             completed: 0,
@@ -341,16 +341,28 @@ impl SCModToolApp {
         self.selected_bank()?.segments.get(self.selected_segment?)
     }
 
-    /// The segment that is playing, or being decoded to play.
+    /// The segment that is playing or paused, or being decoded to play.
     fn playing_segment_id(&self) -> Option<&str> {
         self.active_playback
             .as_ref()
+            .filter(|playback| !playback.stopped)
             .map(|playback| playback.segment_id.as_str())
-            .or_else(|| {
-                self.pending_playback
-                    .as_ref()
-                    .map(|pending| pending.segment_id.as_str())
-            })
+            .or_else(|| self.pending_segment_id())
+    }
+
+    /// The segment shown in the status bar: the one playing, or the last one
+    /// played.
+    fn loaded_segment_id(&self) -> Option<&str> {
+        self.active_playback
+            .as_ref()
+            .map(|playback| playback.segment_id.as_str())
+            .or_else(|| self.pending_segment_id())
+    }
+
+    fn pending_segment_id(&self) -> Option<&str> {
+        self.pending_playback
+            .as_ref()
+            .map(|pending| pending.segment_id.as_str())
     }
 
     /// Plays the segment, or stops it if it is already playing.
@@ -364,7 +376,29 @@ impl SCModToolApp {
         if self.playing_segment_id() == Some(segment.id.as_str()) {
             self.stop_playback();
             self.set_status("Playback stopped.", false);
+        } else if self.loaded_segment_id() == Some(segment.id.as_str()) {
+            // The last segment played is still loaded, so play it again.
+            self.toggle_pause();
         } else {
+            self.play_segment(ctx, segment_index);
+        }
+    }
+
+    /// Pauses or resumes the segment if it is loaded, or plays it.
+    fn play_or_pause(&mut self, ctx: &egui::Context, segment_index: usize) {
+        let Some(segment) = self
+            .selected_bank()
+            .and_then(|bank| bank.segments.get(segment_index))
+        else {
+            return;
+        };
+        let is_loaded = self
+            .active_playback
+            .as_ref()
+            .is_some_and(|playback| playback.segment_id == segment.id);
+        if is_loaded {
+            self.toggle_pause();
+        } else if self.pending_segment_id() != Some(segment.id.as_str()) {
             self.play_segment(ctx, segment_index);
         }
     }
@@ -380,7 +414,7 @@ impl SCModToolApp {
             return;
         };
         let bank_path = bank.path.clone();
-        self.stop_playback();
+        self.clear_playback();
         self.playback_request = self.playback_request.wrapping_add(1);
         let request = self.playback_request;
         let segment_id = segment.id.clone();
@@ -403,20 +437,39 @@ impl SCModToolApp {
         });
     }
 
+    /// Stops playback, keeping the segment in the status bar so it can be
+    /// played again.
     fn stop_playback(&mut self) {
+        self.cancel_pending_playback();
+        self.seek_drag = None;
+        if let Some(playback) = &mut self.active_playback
+            && !playback.stopped
+            && let Err(error) = self.audio.stop(playback)
+        {
+            self.active_playback = None;
+            self.set_status(format!("Could not stop playback: {error}"), true);
+        }
+    }
+
+    /// Stops playback and removes the segment from the status bar.
+    fn clear_playback(&mut self) {
+        self.cancel_pending_playback();
+        self.seek_drag = None;
+        if let Some(playback) = self.active_playback.take() {
+            playback.sink.stop();
+        }
+    }
+
+    fn cancel_pending_playback(&mut self) {
         if let Some(pending) = self.pending_playback.take() {
             pending.cancel.store(true, Ordering::Relaxed);
         }
         self.playback_request = self.playback_request.wrapping_add(1);
-        if let Some(playback) = self.active_playback.take() {
-            playback.sink.stop();
-        }
-        self.seek_drag = None;
     }
 
     fn seek(&mut self, position: Duration) {
         self.seek_drag = None;
-        if let Some(playback) = &self.active_playback
+        if let Some(playback) = &mut self.active_playback
             && let Err(error) = playback.seek(position)
         {
             self.set_status(format!("Could not seek: {error}"), true);
@@ -424,7 +477,7 @@ impl SCModToolApp {
     }
 
     fn toggle_pause(&mut self) {
-        if let Some(playback) = &self.active_playback {
+        if let Some(playback) = &mut self.active_playback {
             playback.toggle_pause();
         }
     }
@@ -569,21 +622,25 @@ impl eframe::App for SCModToolApp {
             self.open_root(ctx, root);
         }
         self.handle_messages(ctx);
+        // Rewind a segment that has played to the end.
         if self
             .active_playback
             .as_ref()
-            .is_some_and(|playback| playback.sink.empty())
+            .is_some_and(|playback| !playback.stopped && playback.sink.empty())
         {
-            self.active_playback = None;
-            self.seek_drag = None;
+            self.stop_playback();
         }
+        let is_playing = self
+            .active_playback
+            .as_ref()
+            .is_some_and(|playback| !playback.stopped);
 
         // Keep repainting while work is in progress, so finished playback is
         // noticed without waiting for input.
         if self.scan_progress.is_some()
             || self.discovering_languages
             || self.pending_playback.is_some()
-            || self.active_playback.is_some()
+            || is_playing
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }

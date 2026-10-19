@@ -28,7 +28,7 @@ enum Action {
     SelectBank(usize),
     SelectSegment(usize),
     TogglePlayback(usize),
-    StopPlayback,
+    PlayOrPause(usize),
     TogglePause,
     /// Move the seeker without seeking yet, or stop moving it.
     DragSeek(Option<f32>),
@@ -55,6 +55,11 @@ impl SCModToolApp {
         }
         self.show_warnings_window(&ctx);
 
+        // Show what the actions change, e.g. playback starting, which keeps
+        // repainting from the next frame.
+        if !actions.is_empty() {
+            ctx.request_repaint();
+        }
         for action in actions {
             self.apply(&ctx, action);
         }
@@ -72,7 +77,10 @@ impl SCModToolApp {
                 self.selected_segment = Some(index);
                 self.toggle_playback(ctx, index);
             }
-            Action::StopPlayback => self.stop_playback(),
+            Action::PlayOrPause(index) => {
+                self.selected_segment = Some(index);
+                self.play_or_pause(ctx, index);
+            }
             Action::TogglePause => self.toggle_pause(),
             Action::DragSeek(position) => self.seek_drag = position,
             Action::Seek(position) => self.seek(position),
@@ -80,7 +88,7 @@ impl SCModToolApp {
         }
     }
 
-    /// Arrow keys move through the segment list, and Space plays or stops the
+    /// Arrow keys move through the segment list, and Space plays or pauses the
     /// selected segment.
     fn handle_keyboard(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if ctx.egui_wants_keyboard_input() || self.selected_bank().is_none() {
@@ -109,7 +117,7 @@ impl SCModToolApp {
             }
         }
         if space && let Some(index) = self.selected_segment {
-            actions.push(Action::TogglePlayback(index));
+            actions.push(Action::PlayOrPause(index));
         }
     }
 
@@ -196,26 +204,19 @@ impl SCModToolApp {
                     {
                         actions.push(Action::ToggleWarnings);
                     }
-                    if let Some(id) = self.playing_segment_id() {
-                        if ui.button(format!("{} Stop", ICON_STOP.codepoint)).clicked() {
-                            actions.push(Action::StopPlayback);
-                        }
+                    if let Some(id) = self.loaded_segment_id() {
                         let label = self.find_segment(id).map_or_else(
                             || id.to_owned(),
                             |(bank, segment)| segment_label(bank, segment),
                         );
-                        let (icon, state) = match &self.active_playback {
-                            Some(playback) => {
-                                self.show_playback_controls(ui, playback, actions);
-                                if playback.sink.is_paused() {
-                                    (ICON_PAUSE, "Paused")
-                                } else {
-                                    (ICON_PLAY_ARROW, "Playing")
-                                }
-                            }
-                            None => (ICON_PLAY_ARROW, "Loading"),
-                        };
-                        ui.label(format!("{} {state} {label}", icon.codepoint));
+                        if let Some(playback) = &self.active_playback {
+                            self.show_playback_controls(ui, playback, actions);
+                        }
+                        ui.label(label);
+                        if self.active_playback.is_none() {
+                            // Still being decoded.
+                            ui.spinner();
+                        }
                         ui.separator();
                     }
                     // The status takes whatever space the controls leave.
@@ -615,9 +616,11 @@ impl SCModToolApp {
                         ui.add_space(8.0);
 
                         // Segment actions. Export and replace will go here.
-                        let is_playing = self.playing_segment_id() == Some(segment.id.as_str());
+                        let is_playing = self.active_playback.as_ref().is_some_and(|playback| {
+                            playback.segment_id == segment.id && !playback.sink.is_paused()
+                        });
                         let (icon, label) = if is_playing {
-                            (ICON_STOP, "Stop")
+                            (ICON_PAUSE, "Pause")
                         } else {
                             (ICON_PLAY_ARROW, "Play")
                         };
@@ -627,7 +630,7 @@ impl SCModToolApp {
                             .on_hover_text("Space")
                             .clicked()
                         {
-                            actions.push(Action::TogglePlayback(index));
+                            actions.push(Action::PlayOrPause(index));
                         }
 
                         ui.add_space(8.0);
