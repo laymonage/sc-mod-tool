@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -183,13 +184,24 @@ fn build_uelib_bridge(manifest_dir: &Path) {
                 .file_name()
                 .expect("bridge runtime library has a filename"),
         );
-        fs::copy(&runtime_library, &destination).unwrap_or_else(|error| {
+        replace_file(&runtime_library, &destination).unwrap_or_else(|error| {
             panic!(
                 "Could not copy the UELib bridge to {}: {error}",
                 destination.display()
             )
         });
     }
+}
+
+/// Copies a library over an older copy as a new file. Overwriting it in place
+/// keeps the old file's code signature cached on macOS, which then kills the
+/// app when it loads the new library.
+fn replace_file(from: &Path, to: &Path) -> io::Result<u64> {
+    match fs::remove_file(to) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::copy(from, to)
 }
 
 #[derive(Clone, Copy)]
@@ -228,7 +240,7 @@ fn prepare_linker_library(publish_dir: &Path, extension: &str) -> (PathBuf, Path
             published_library.display()
         );
     }
-    fs::copy(&published_library, &linker_library).unwrap_or_else(|error| {
+    replace_file(&published_library, &linker_library).unwrap_or_else(|error| {
         panic!(
             "Could not prepare the UELib bridge for linking at {}: {error}",
             linker_library.display()
