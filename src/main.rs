@@ -2,13 +2,19 @@ mod app;
 mod audio;
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{self, PathBuf};
 
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
     // Optionally open a game folder straight away: `sc-mod-tool <game folder>`.
-    let startup_root = env::args_os().nth(1).map(PathBuf::from);
+    // The folder is made absolute, so it can be reopened from anywhere next time.
+    let startup_root = env::args_os().nth(1).map(|root| {
+        fs::canonicalize(&root)
+            .or_else(|_| path::absolute(&root))
+            .unwrap_or_else(|_| root.into())
+    });
     eframe::run_native(
         "SC Mod Tool",
         eframe::NativeOptions {
@@ -18,6 +24,13 @@ fn main() -> eframe::Result<()> {
                 .with_min_inner_size([900.0, 560.0]),
             ..Default::default()
         },
-        Box::new(|_| Ok(Box::new(app::SCModToolApp::new(startup_root)))),
+        Box::new(|cc| {
+            // Otherwise reopen the folder from last time, if it is still there.
+            let startup_root = startup_root.or_else(|| {
+                let root = PathBuf::from(cc.storage?.get_string(app::ROOT_KEY)?);
+                root.is_dir().then_some(root)
+            });
+            Ok(Box::new(app::SCModToolApp::new(startup_root)))
+        }),
     )
 }

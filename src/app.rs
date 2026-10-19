@@ -553,7 +553,17 @@ impl SCModToolApp {
     }
 }
 
+/// The storage key for the last game folder opened.
+pub const ROOT_KEY: &str = "root";
+
 impl eframe::App for SCModToolApp {
+    /// Remembers the game folder, to open it again next time.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Some(root) = self.root.as_ref().and_then(|root| root.to_str()) {
+            storage.set_string(ROOT_KEY, root.to_owned());
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some(root) = self.startup_root.take() {
             self.open_root(ctx, root);
@@ -581,15 +591,5 @@ impl eframe::App for SCModToolApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
-    }
-
-    fn on_exit(&mut self) {
-        // eframe 0.36 crashes in AppKit's Touch Bar code when the window is
-        // closed with its close button, because the window is torn down
-        // while the event loop keeps running. Nothing needs saving, so end
-        // the process before that happens.
-        // https://github.com/emilk/egui/issues/8717
-        #[cfg(target_os = "macos")]
-        std::process::exit(0);
     }
 }
