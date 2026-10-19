@@ -170,45 +170,6 @@ impl SCModToolApp {
         egui::Panel::bottom("status-bar").show(ui, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                if let Some(progress) = &self.scan_progress {
-                    ui.spinner();
-                    match progress {
-                        ScanProgress::Banks {
-                            completed,
-                            total,
-                            bank,
-                        } if !self.is_cancelling_scan() => {
-                            let fraction = if *total == 0 {
-                                0.0
-                            } else {
-                                *completed as f32 / *total as f32
-                            };
-                            ui.add(
-                                egui::ProgressBar::new(fraction)
-                                    .desired_width(180.0)
-                                    .text(format!("{completed} / {total} banks")),
-                            );
-                            if ui.small_button("Cancel").clicked() {
-                                actions.push(Action::CancelScan);
-                            }
-                            ui.label(RichText::new(bank).weak());
-                        }
-                        _ => {
-                            ui.label(self.scan_activity());
-                            if !self.is_cancelling_scan() && ui.small_button("Cancel").clicked() {
-                                actions.push(Action::CancelScan);
-                            }
-                        }
-                    }
-                } else if self.status.is_error {
-                    ui.label(
-                        RichText::new(format!("⚠ {}", self.status.message))
-                            .color(ui.visuals().error_fg_color),
-                    );
-                } else {
-                    ui.label(&self.status.message);
-                }
-
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if !self.subtitle_warnings.is_empty()
                         && ui
@@ -245,6 +206,52 @@ impl SCModToolApp {
                         ui.label(format!("{state} {label}"));
                         ui.separator();
                     }
+                    // The status takes whatever space the controls leave.
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        if let Some(progress) = &self.scan_progress {
+                            ui.spinner();
+                            match progress {
+                                ScanProgress::Banks {
+                                    completed,
+                                    total,
+                                    bank,
+                                } if !self.is_cancelling_scan() => {
+                                    let fraction = if *total == 0 {
+                                        0.0
+                                    } else {
+                                        *completed as f32 / *total as f32
+                                    };
+                                    ui.add(
+                                        egui::ProgressBar::new(fraction)
+                                            .desired_width(180.0)
+                                            .text(format!("{completed} / {total} banks")),
+                                    );
+                                    if ui.small_button("Cancel").clicked() {
+                                        actions.push(Action::CancelScan);
+                                    }
+                                    ui.add(egui::Label::new(RichText::new(bank).weak()).truncate());
+                                }
+                                _ => {
+                                    ui.add(egui::Label::new(self.scan_activity()).truncate());
+                                    if !self.is_cancelling_scan()
+                                        && ui.small_button("Cancel").clicked()
+                                    {
+                                        actions.push(Action::CancelScan);
+                                    }
+                                }
+                            }
+                        } else if self.status.is_error {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("⚠ {}", self.status.message))
+                                        .color(ui.visuals().error_fg_color),
+                                )
+                                .truncate(),
+                            );
+                        } else {
+                            ui.add(egui::Label::new(&self.status.message).truncate());
+                        }
+                    });
                 });
             });
             ui.add_space(2.0);
