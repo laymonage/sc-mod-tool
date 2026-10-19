@@ -183,7 +183,7 @@ impl SCModToolApp {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if !self.subtitle_warnings.is_empty()
                         && ui
-                            .small_button(
+                            .button(
                                 RichText::new(format!(
                                     "{} {} warnings",
                                     ICON_WARNING.codepoint,
@@ -196,10 +196,7 @@ impl SCModToolApp {
                         actions.push(Action::ToggleWarnings);
                     }
                     if let Some(id) = self.playing_segment_id() {
-                        if ui
-                            .small_button(format!("{} Stop", ICON_STOP.codepoint))
-                            .clicked()
-                        {
+                        if ui.button(format!("{} Stop", ICON_STOP.codepoint)).clicked() {
                             actions.push(Action::StopPlayback);
                         }
                         let label = self.find_segment(id).map_or_else(
@@ -240,16 +237,14 @@ impl SCModToolApp {
                                             .desired_width(180.0)
                                             .text(format!("{completed} / {total} banks")),
                                     );
-                                    if ui.small_button("Cancel").clicked() {
+                                    if ui.button("Cancel").clicked() {
                                         actions.push(Action::CancelScan);
                                     }
                                     ui.add(egui::Label::new(RichText::new(bank).weak()).truncate());
                                 }
                                 _ => {
                                     ui.add(egui::Label::new(self.scan_activity()).truncate());
-                                    if !self.is_cancelling_scan()
-                                        && ui.small_button("Cancel").clicked()
-                                    {
+                                    if !self.is_cancelling_scan() && ui.button("Cancel").clicked() {
                                         actions.push(Action::CancelScan);
                                     }
                                 }
@@ -307,7 +302,7 @@ impl SCModToolApp {
         } else {
             ICON_PAUSE
         };
-        if ui.small_button(pause_icon).clicked() {
+        if ui.button(pause_icon).clicked() {
             actions.push(Action::TogglePause);
         }
     }
