@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use super::bridge::{BridgeCall, BridgePattern};
 use super::localization::line_text;
 use super::map::{SoundMap, clip_seconds, resolve_segments};
-use super::sound_keys::KeyCorrections;
 use super::{MappingConfidence, Subtitle, SubtitleAnalysis, add_subtitle, push_warning};
 
 /// Matches the sounds a pattern plays without a subtitle to the lines of the
@@ -21,7 +20,6 @@ pub(super) fn match_unshown_subtitles(
     pattern: &BridgePattern,
     sections: &HashMap<String, Vec<(String, String)>>,
     reference_sections: &HashMap<String, Vec<(String, String)>>,
-    corrections: &KeyCorrections,
     maps: &[SoundMap],
 ) {
     let lines = spoken_lines(sections, &pattern.pattern);
@@ -35,10 +33,9 @@ pub(super) fn match_unshown_subtitles(
     if lines.is_empty() || calls.iter().all(|call| call.cue.is_some()) {
         return;
     }
-    let key_of = |call: &BridgeCall| corrections.key(&call.sound_event).or(call.sound_map_key);
     let durations = calls
         .iter()
-        .map(|call| key_of(call).and_then(|key| clip_seconds(key, maps)))
+        .map(|call| call.sound_map_key.and_then(|key| clip_seconds(key, maps)))
         .collect::<Vec<_>>();
 
     let matched = match align(&pattern.pattern, &calls, &reference_lines, &durations) {
@@ -62,7 +59,7 @@ pub(super) fn match_unshown_subtitles(
         if call.cue.is_some() {
             continue;
         }
-        let Some(key) = key_of(call) else {
+        let Some(key) = call.sound_map_key else {
             continue;
         };
         let segments = match resolve_segments(&call.sound_event, key, maps) {
@@ -327,6 +324,7 @@ mod tests {
             records.insert(
                 key,
                 HashSet::from([MapRecord {
+                    resource_key: key,
                     offset,
                     compressed_bytes: 10,
                     sample_count,
@@ -356,7 +354,6 @@ mod tests {
             &pattern,
             &sections,
             &sections,
-            &KeyCorrections::default(),
             &test_maps(records, &banks),
         );
 
@@ -400,7 +397,6 @@ mod tests {
             &pattern,
             &german,
             &english,
-            &KeyCorrections::default(),
             &test_maps(records, &banks),
         );
 
@@ -443,7 +439,6 @@ mod tests {
             &pattern,
             &sections,
             &sections,
-            &KeyCorrections::default(),
             &test_maps(records, &banks),
         );
 
@@ -503,7 +498,6 @@ mod tests {
             &pattern,
             &sections,
             &sections,
-            &KeyCorrections::default(),
             &test_maps(records, &banks),
         );
 
@@ -541,7 +535,6 @@ mod tests {
             &pattern,
             &sections,
             &sections,
-            &KeyCorrections::default(),
             &test_maps(records, &banks),
         );
 
@@ -586,7 +579,6 @@ mod tests {
             &pattern,
             &sections,
             &sections,
-            &KeyCorrections::default(),
             &test_maps(records, &banks),
         );
 
@@ -628,14 +620,7 @@ mod tests {
         let mut analysis = SubtitleAnalysis::default();
 
         for pattern in [&fewer_sounds, &misplaced_cue] {
-            match_unshown_subtitles(
-                &mut analysis,
-                pattern,
-                &sections,
-                &sections,
-                &KeyCorrections::default(),
-                &maps,
-            );
+            match_unshown_subtitles(&mut analysis, pattern, &sections, &sections, &maps);
         }
 
         assert_eq!(analysis.unshown_pairs, 0);

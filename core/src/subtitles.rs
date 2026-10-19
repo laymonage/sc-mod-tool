@@ -2,9 +2,8 @@ mod alignment;
 mod bridge;
 pub(crate) mod localization;
 pub(crate) mod map;
-mod sound_keys;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,8 +19,7 @@ use crate::sounds_folder::{
 use alignment::match_unshown_subtitles;
 use bridge::{BridgeLink, BridgePattern, scan_compiled_links};
 use localization::{find_cue, line_text, localization_path, localization_sections};
-use map::{SoundMap, mark_foreign_packages, parse_map_records, resolve_segments};
-use sound_keys::{KeyCorrections, PackageKeys};
+use map::{SoundMap, parse_map_records, resolve_segments};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MappingConfidence {
@@ -87,8 +85,6 @@ pub struct CompiledLinks {
     links: Vec<BridgeLink>,
     issues: Vec<String>,
     patterns: Vec<BridgePattern>,
-    corrections: KeyCorrections,
-    package_keys: Vec<PackageKeys>,
 }
 
 /// Matches `language`'s sound banks to subtitle cues.
@@ -129,6 +125,7 @@ pub fn load_verified_subtitles(
     }];
     folders.extend(map_language_folders(&sounds, language)?);
     let mut maps = Vec::with_capacity(folders.len());
+    let mut map_warnings = Vec::new();
     for folder in folders {
         let map_path = find_file(
             &safe_child_path(&sounds, &folder.relative_path)?,
@@ -136,11 +133,18 @@ pub fn load_verified_subtitles(
         )?;
         let map_data = fs::read(&map_path)
             .map_err(|error| format!("Could not read {}: {error}", map_path.display()))?;
+        let records = parse_map_records(&map_data).unwrap_or_else(|error| {
+            map_warnings.push(format!(
+                "{}/MAPS.LM0 {error}, so its sounds' subtitles aren't matched.",
+                folder.relative_path
+            ));
+            HashMap::new()
+        });
+        let file_name = map_path.file_name().unwrap_or_default().to_string_lossy();
         maps.push(SoundMap {
-            records: parse_map_records(&map_data),
+            path: format!("{}/{file_name}", folder.relative_path),
+            records,
             banks: banks.iter().filter(|bank| bank.map == folder.map).collect(),
-            folder: folder.relative_path,
-            foreign_packages: HashSet::new(),
         });
     }
 
@@ -148,29 +152,11 @@ pub fn load_verified_subtitles(
         Some(links) => Arc::clone(links),
         None => {
             let result = scan_compiled_links(game_root, cancelled)?;
-            let played = result
-                .links
-                .iter()
-                .map(|link| &link.sound_event)
-                .chain(
-                    result
-                        .patterns
-                        .iter()
-                        .flat_map(|pattern| &pattern.calls)
-                        .map(|call| &call.sound_event),
-                )
-                .map(|sound_event| sound_event.to_ascii_lowercase())
-                .collect();
-            let corrections =
-                sound_keys::correct(game_root, &sounds, &result.sound_packages, &played);
-            let package_keys = sound_keys::package_keys(&result.sound_packages, &corrections);
             compiled_links
                 .insert(Arc::new(CompiledLinks {
                     links: result.links,
                     issues: result.issues,
                     patterns: result.patterns,
-                    corrections,
-                    package_keys,
                 }))
                 .clone()
         }
@@ -182,6 +168,9 @@ pub fn load_verified_subtitles(
         explicit_pairs: bridge.links.len(),
         ..SubtitleAnalysis::default()
     };
+    for warning in map_warnings {
+        push_warning(&mut analysis.warnings, warning);
+    }
     for issue in bridge.issues.iter().take(12) {
         push_warning(&mut analysis.warnings, issue.clone());
     }
@@ -193,12 +182,6 @@ pub fn load_verified_subtitles(
                 bridge.issues.len() - 12
             ),
         );
-    }
-    for note in &bridge.corrections.notes {
-        push_warning(&mut analysis.warnings, note.clone());
-    }
-    for map in &mut maps {
-        mark_foreign_packages(map, &bridge.package_keys, &mut analysis.warnings);
     }
     if bridge.links.is_empty() {
         push_warning(
@@ -213,10 +196,7 @@ pub fn load_verified_subtitles(
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        let key = bridge
-            .corrections
-            .key(&link.sound_event)
-            .unwrap_or(link.sound_map_key);
+        let key = link.sound_map_key;
         let segments = match resolve_segments(&link.sound_event, key, &maps) {
             Ok(segments) => segments,
             Err(warning) => {
@@ -288,7 +268,6 @@ pub fn load_verified_subtitles(
                     pattern,
                     &sections,
                     english.as_ref().unwrap_or(&sections),
-                    &bridge.corrections,
                     &maps,
                 );
             }
@@ -352,16 +331,16 @@ fn push_warning(warnings: &mut Vec<String>, warning: String) {
 mod tests {
     use super::*;
     use map::MapRecord;
+    use std::collections::HashSet;
 
     pub(super) fn test_maps(
         records: HashMap<u32, HashSet<MapRecord>>,
         banks: &[super::super::Bank],
     ) -> Vec<SoundMap<'_>> {
         vec![SoundMap {
-            folder: "ENGLISH".to_owned(),
+            path: "ENGLISH/MAPS.LM0".to_owned(),
             records,
             banks: banks.iter().collect(),
-            foreign_packages: HashSet::new(),
         }]
     }
 
@@ -404,6 +383,7 @@ mod tests {
                 (
                     key,
                     HashSet::from([MapRecord {
+                        resource_key: key,
                         offset,
                         compressed_bytes: 10,
                         sample_count: 20,

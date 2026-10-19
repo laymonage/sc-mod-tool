@@ -1,14 +1,20 @@
 use std::collections::{HashMap, HashSet};
 
-use super::push_warning;
-use super::sound_keys::PackageKeys;
-
-/// The bytes holding the fields every record needs. Records are 128 bytes, but
-/// the sample rate and bank name after these are optional.
-const MAP_RECORD_REQUIRED_SIZE: usize = 56;
+/// The sizes of a map's area entries, events and resources.
+const AREA_SIZE: usize = 0x30;
+const EVENT_SIZE: usize = 0x58;
+const RESOURCE_SIZE: usize = 0x80;
+/// The top bits of an event's reference to a resource. The rest is the
+/// resource's index in its area.
+const RESOURCE_REFERENCE: u32 = 0x4000_0000;
+/// The type of a resource that's a clip of audio.
+const AUDIO: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MapRecord {
+    /// The key of the resource holding the audio, which the event that plays
+    /// it doesn't always share.
+    pub(crate) resource_key: u32,
     pub(super) offset: u32,
     pub(super) compressed_bytes: u32,
     pub(crate) sample_count: u32,
@@ -23,47 +29,10 @@ pub(crate) struct MapRecord {
 /// A `MAPS.LM0` and the banks it describes: the language's own folder, or one
 /// of an extra map's language folders, which have their own banks and maps.
 pub(super) struct SoundMap<'a> {
-    /// The folder, relative to `Sounds`, such as `1_7_1_2Vselka/English`.
-    pub(super) folder: String,
+    /// The map, relative to `Sounds`, such as `1_7_1_2Vselka/English/MAPS.LM0`.
+    pub(super) path: String,
     pub(super) records: HashMap<u32, HashSet<MapRecord>>,
     pub(super) banks: Vec<&'a crate::Bank>,
-    /// IDs of packages this map was made for another version of, whose keys
-    /// point at other audio here.
-    pub(super) foreign_packages: HashSet<u32>,
-}
-
-/// Finds the packages `map` was made for another version of: most of its
-/// records under the package's ID are for sounds the package doesn't have. The
-/// extra Vselka maps were made this way for `S3_1_1Voice`, so the game's keys
-/// for that package point at other lines there.
-pub(super) fn mark_foreign_packages(
-    map: &mut SoundMap,
-    packages: &[PackageKeys],
-    warnings: &mut Vec<String>,
-) {
-    for package in packages {
-        let (mut known, mut unknown) = (0, 0);
-        for key in map.records.keys().filter(|key| *key >> 16 == package.id) {
-            if package.keys.contains(key) {
-                known += 1;
-            } else {
-                unknown += 1;
-            }
-        }
-        if unknown > known {
-            map.foreign_packages.insert(package.id);
-            push_warning(
-                warnings,
-                format!(
-                    "{}/MAPS.LM0 was made for another version of {}: {unknown} of its {} sounds for that package aren't in {}.uax, so the package's subtitles aren't matched there.",
-                    map.folder,
-                    package.package,
-                    known + unknown,
-                    package.package
-                ),
-            );
-        }
-    }
 }
 
 /// The duration of the clip a key's map record describes, from the first map
@@ -71,7 +40,6 @@ pub(super) fn mark_foreign_packages(
 pub(super) fn clip_seconds(key: u32, maps: &[SoundMap]) -> Option<f64> {
     let record = maps
         .iter()
-        .filter(|map| !map.foreign_packages.contains(&(key >> 16)))
         .find_map(|map| map.records.get(&key))?
         .iter()
         .next()?;
@@ -83,45 +51,76 @@ pub(super) fn clip_seconds(key: u32, maps: &[SoundMap]) -> Option<f64> {
     Some(f64::from(record.sample_count) / f64::from(rate))
 }
 
-pub(crate) fn parse_map_records(data: &[u8]) -> HashMap<u32, HashSet<MapRecord>> {
+/// Reads a `MAPS.LM0`'s audio, by the keys of the events that play it.
+///
+/// The map is split into areas, one for each level plus `fix` and `menu`.
+/// Each area has a list of events, whose keys are what the game's sound
+/// packages store, and a list of resources, which describe the audio. An event
+/// plays a resource by its index in the area's list. The event's key is
+/// usually the resource's too, but not always: in some packages a run of
+/// events plays its resources in reverse order, for example.
+pub(crate) fn parse_map_records(data: &[u8]) -> Result<HashMap<u32, HashSet<MapRecord>>, String> {
+    let unreadable = || "isn't a sound map this tool can read".to_owned();
+    if read_u32(data, 0) != Some(7) {
+        return Err(unreadable());
+    }
+    let areas_offset = read_u32(data, 4).ok_or_else(unreadable)? as usize;
+    let area_count = read_u32(data, 8).ok_or_else(unreadable)? as usize;
+
     let mut records = HashMap::<u32, HashSet<MapRecord>>::new();
-    if data.len() < MAP_RECORD_REQUIRED_SIZE {
-        return records;
-    }
-
-    for position in (0..=data.len() - MAP_RECORD_REQUIRED_SIZE).step_by(4) {
-        let Some(key) = read_u32(data, position) else {
-            continue;
+    for area in 0..area_count {
+        let entry = area
+            .checked_mul(AREA_SIZE)
+            .and_then(|offset| offset.checked_add(areas_offset))
+            .ok_or_else(unreadable)?;
+        let area_offset = read_u32(data, entry + 8).ok_or_else(unreadable)? as usize;
+        let section = |field: usize| -> Option<(usize, usize)> {
+            let offset = area_offset.checked_add(read_u32(data, area_offset + field)? as usize)?;
+            let count = read_u32(data, area_offset + field + 4)? as usize;
+            Some((offset, count))
         };
-        if read_u32(data, position + 4) != Some(1) || read_u32(data, position + 8) != Some(1) {
-            continue;
+        let (events_offset, event_count) = section(4).ok_or_else(unreadable)?;
+        let (resources_offset, resource_count) = section(0xc).ok_or_else(unreadable)?;
+
+        for event in 0..event_count {
+            let event = events_offset + event * EVENT_SIZE;
+            let (Some(key), Some(reference)) = (read_u32(data, event), read_u32(data, event + 8))
+            else {
+                return Err(unreadable());
+            };
+            let index = (reference & 0x0FFF_FFFF) as usize;
+            if reference & 0xF000_0000 != RESOURCE_REFERENCE || index >= resource_count {
+                continue;
+            }
+            if let Some(record) = read_audio_record(data, resources_offset + index * RESOURCE_SIZE)
+            {
+                records.entry(key).or_default().insert(record);
+            }
         }
-
-        let Some(compressed_bytes) = read_u32(data, position + 12) else {
-            continue;
-        };
-        let Some(offset) = read_u32(data, position + 20) else {
-            continue;
-        };
-        let Some(sample_count) = read_u32(data, position + 48) else {
-            continue;
-        };
-        if compressed_bytes == 0
-            || sample_count == 0
-            || read_u32(data, position + 52) != Some(compressed_bytes)
-        {
-            continue;
-        }
-
-        records.entry(key).or_default().insert(MapRecord {
-            offset,
-            compressed_bytes,
-            sample_count,
-            sample_rate: read_u32(data, position + 68).unwrap_or(0),
-            bank: read_bank_name(data, position + 80),
-        });
     }
-    records
+    Ok(records)
+}
+
+/// Reads the resource at `position`, if it's a clip of audio.
+fn read_audio_record(data: &[u8], position: usize) -> Option<MapRecord> {
+    let compressed_bytes = read_u32(data, position + 12)?;
+    let sample_count = read_u32(data, position + 48)?;
+    if read_u32(data, position + 4)? != AUDIO
+        || read_u32(data, position + 8)? != 1
+        || compressed_bytes == 0
+        || sample_count == 0
+        || read_u32(data, position + 52)? != compressed_bytes
+    {
+        return None;
+    }
+    Some(MapRecord {
+        resource_key: read_u32(data, position)?,
+        offset: read_u32(data, position + 20)?,
+        compressed_bytes,
+        sample_count,
+        sample_rate: read_u32(data, position + 68).unwrap_or(0),
+        bank: read_bank_name(data, position + 80),
+    })
 }
 
 /// Reads a record's null-terminated bank file name, which is at most 32 bytes.
@@ -145,29 +144,18 @@ pub(super) fn resolve_segments<'a>(
 ) -> Result<Vec<&'a crate::Segment>, String> {
     let mut segments = Vec::new();
     let mut warning = None;
-    let mut in_foreign_map = false;
     for map in maps {
         if !map.records.contains_key(&key) {
             continue;
         }
-        if map.foreign_packages.contains(&(key >> 16)) {
-            in_foreign_map = true;
-            continue;
-        }
-        match resolve_segment(sound_event, key, &map.records, &map.banks) {
+        match resolve_segment(sound_event, key, map) {
             Ok(segment) => segments.push(segment),
             Err(error) => warning = warning.or(Some(error)),
         }
     }
     if segments.is_empty() {
         Err(warning.unwrap_or_else(|| {
-            if in_foreign_map {
-                format!(
-                    "{sound_event} (key 0x{key:08X}) is only in maps made for another version of its package."
-                )
-            } else {
-                format!("{sound_event} (key 0x{key:08X}) has no matching entry in MAPS.LM0.")
-            }
+            format!("{sound_event} (key 0x{key:08X}) has no matching entry in MAPS.LM0.")
         }))
     } else {
         Ok(segments)
@@ -177,20 +165,25 @@ pub(super) fn resolve_segments<'a>(
 fn resolve_segment<'a>(
     sound_event: &str,
     key: u32,
-    map_records: &HashMap<u32, HashSet<MapRecord>>,
-    banks: &[&'a crate::Bank],
+    map: &SoundMap<'a>,
 ) -> Result<&'a crate::Segment, String> {
-    let Some(records) = map_records.get(&key) else {
+    let Some(records) = map.records.get(&key) else {
         return Err(format!(
             "{sound_event} (key 0x{key:08X}) has no matching entry in MAPS.LM0."
         ));
     };
 
     let expected_code = sound_package_bank_code(sound_event);
-    let mut matches = Vec::new();
+    let mut matches = Vec::<&crate::Segment>::new();
+    let mut add = |segment: &'a crate::Segment| {
+        if !matches.iter().any(|matched| matched.id == segment.id) {
+            matches.push(segment);
+        }
+    };
     for record in records {
+        // Audio in a numeric `.LS0` bank is a stream found by scanning it.
         // Records name their bank; the package name is only a fallback.
-        for bank in banks.iter().filter(|bank| match &record.bank {
+        for bank in map.banks.iter().filter(|bank| match &record.bank {
             Some(name) => bank.name.eq_ignore_ascii_case(name),
             None => expected_code
                 .as_deref()
@@ -200,11 +193,26 @@ fn resolve_segment<'a>(
                 if segment.stream_range()
                     == Some((u64::from(record.offset), u64::from(record.compressed_bytes)))
                     && segment.sample_count == record.sample_count
-                    && !matches
-                        .iter()
-                        .any(|matched: &&crate::Segment| matched.id == segment.id)
                 {
-                    matches.push(segment);
+                    add(segment);
+                }
+            }
+        }
+        // Other audio, such as Lambert's alarm warnings in
+        // `Music_Common.LS0`, is listed with this map's sounds, under the key
+        // of its resource.
+        for bank in map
+            .banks
+            .iter()
+            .filter(|bank| bank.sound_kind.is_some() && bank.path == map.path)
+        {
+            for segment in &bank.segments {
+                if matches!(
+                    segment.source,
+                    crate::SegmentSource::MapSound { key: Some(resource_key), .. }
+                        if resource_key == record.resource_key
+                ) {
+                    add(segment);
                 }
             }
         }
@@ -240,46 +248,87 @@ fn sound_package_bank_code(sound_event: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subtitles::tests::{test_bank, test_records};
+    use crate::subtitles::tests::{test_bank, test_maps, test_records};
+
+    /// A map with one area, whose events play the resources at the given
+    /// indexes, each an audio clip with the given key at offset `key * 100`.
+    fn test_map(events: &[(u32, u32)], resource_keys: &[u32]) -> Vec<u8> {
+        let area = 0x0c + AREA_SIZE;
+        let events_offset = 0x24;
+        let resources_offset = events_offset + events.len() * EVENT_SIZE;
+        let mut data = vec![0; area + resources_offset + resource_keys.len() * RESOURCE_SIZE];
+        for (position, value) in [(0, 7), (4, 0x0c), (8, 1), (0x0c + 8, area as u32)] {
+            write_u32(&mut data, position, value);
+        }
+        for (field, value) in [
+            (4, events_offset),
+            (8, events.len()),
+            (0xc, resources_offset),
+            (0x10, resource_keys.len()),
+        ] {
+            write_u32(&mut data, area + field, value as u32);
+        }
+        for (index, (key, resource)) in events.iter().enumerate() {
+            let event = area + events_offset + index * EVENT_SIZE;
+            write_u32(&mut data, event, *key);
+            write_u32(&mut data, event + 8, RESOURCE_REFERENCE | resource);
+        }
+        for (index, key) in resource_keys.iter().enumerate() {
+            let resource = area + resources_offset + index * RESOURCE_SIZE;
+            for (field, value) in [
+                (0, *key),
+                (4, AUDIO),
+                (8, 1),
+                (12, 15_571),
+                (20, key * 100),
+                (48, 29_967),
+                (52, 15_571),
+                (68, 36_000),
+            ] {
+                write_u32(&mut data, resource + field, value);
+            }
+            data[resource + 80..resource + 89].copy_from_slice(b"0_0_2.LS0");
+        }
+        data
+    }
 
     #[test]
-    fn parses_map_record_key_offset_size_and_samples() {
-        let mut data = vec![0; 128];
-        write_u32(&mut data, 0, 0x0084_0001);
-        write_u32(&mut data, 4, 1);
-        write_u32(&mut data, 8, 1);
-        write_u32(&mut data, 12, 15_571);
-        write_u32(&mut data, 20, 173_296);
-        write_u32(&mut data, 48, 29_967);
-        write_u32(&mut data, 52, 15_571);
-        write_u32(&mut data, 68, 36_000);
-        data[80..89].copy_from_slice(b"0_0_2.LS0");
-
-        let records = parse_map_records(&data);
+    fn finds_audio_through_the_events_that_play_it() {
+        // Two events play each other's resources, as in `S0_0_2Voice`, and a
+        // third points at no resource.
+        let mut data = test_map(&[(0x3c0000, 1), (0x3c0001, 0)], &[0x3c0000, 0x3c0001]);
+        let records = parse_map_records(&data).unwrap();
+        let record = |key| records.get(&key).unwrap().iter().next().unwrap().clone();
         assert_eq!(
-            records.get(&0x0084_0001),
-            Some(&HashSet::from([MapRecord {
-                offset: 173_296,
+            record(0x3c0000),
+            MapRecord {
+                resource_key: 0x3c0001,
+                offset: 0x3c0001 * 100,
                 compressed_bytes: 15_571,
                 sample_count: 29_967,
                 sample_rate: 36_000,
                 bank: Some("0_0_2.LS0".to_owned()),
-            }]))
+            }
         );
+        assert_eq!(record(0x3c0001).resource_key, 0x3c0000);
+
+        // A resource that isn't audio is skipped.
+        let resource = 0x0c + AREA_SIZE + 0x24 + 2 * EVENT_SIZE;
+        write_u32(&mut data, resource + 4, 8);
+        let records = parse_map_records(&data).unwrap();
+        assert!(!records.contains_key(&0x3c0001));
+        assert!(records.contains_key(&0x3c0000));
     }
 
     #[test]
-    fn ignores_malformed_or_unaligned_map_records() {
-        let mut data = vec![0; MAP_RECORD_REQUIRED_SIZE + 8];
-        write_u32(&mut data, 1, 0x0084_0001);
-        write_u32(&mut data, 5, 1);
-        write_u32(&mut data, 9, 1);
-        write_u32(&mut data, 13, 15_571);
-        write_u32(&mut data, 21, 173_296);
-        write_u32(&mut data, 49, 29_967);
-        write_u32(&mut data, 53, 15_571);
-
-        assert!(parse_map_records(&data).is_empty());
+    fn rejects_maps_it_cant_read() {
+        assert!(parse_map_records(&[]).is_err());
+        let mut data = test_map(&[(1, 0)], &[1]);
+        write_u32(&mut data, 0, 8);
+        assert!(parse_map_records(&data).is_err());
+        let mut data = test_map(&[(1, 0)], &[1]);
+        data.truncate(0x0c + AREA_SIZE + 0x10);
+        assert!(parse_map_records(&data).is_err());
     }
 
     #[test]
@@ -315,10 +364,9 @@ mod tests {
             map_bank("1_7_1_2Vselka", &[0, 100]),
         ];
         let map = |folder: &str, records, banks| SoundMap {
-            folder: folder.to_owned(),
+            path: format!("{folder}/MAPS.LM0"),
             records,
             banks,
-            foreign_packages: HashSet::new(),
         };
         let maps = [
             map(
@@ -353,60 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn skips_packages_a_map_was_made_for_another_version_of() {
-        // The package has sounds 0x450000-0x450002. The extra map files three
-        // sounds under its ID, two of which the package doesn't have, so its
-        // key 0x450001 means some other line there.
-        let banks = test_bank(&[0, 100, 200]);
-        let package = PackageKeys {
-            package: "S1_1_2Voice".to_owned(),
-            id: 0x45,
-            keys: HashSet::from([0x450000, 0x450001, 0x450002]),
-        };
-        let mut maps = vec![
-            SoundMap {
-                folder: "ENGLISH".to_owned(),
-                records: test_records(&[(0x450000, 0), (0x450001, 100)]),
-                banks: vec![&banks[0]],
-                foreign_packages: HashSet::new(),
-            },
-            SoundMap {
-                folder: "1_7_1_2Vselka/English".to_owned(),
-                records: test_records(&[(0x450001, 100), (0x450070, 0), (0x450071, 200)]),
-                banks: vec![&banks[0]],
-                foreign_packages: HashSet::new(),
-            },
-        ];
-        let mut warnings = Vec::new();
-
-        for map in &mut maps {
-            mark_foreign_packages(map, std::slice::from_ref(&package), &mut warnings);
-        }
-
-        assert!(maps[0].foreign_packages.is_empty());
-        assert_eq!(maps[1].foreign_packages, HashSet::from([0x45]));
-        assert_eq!(
-            warnings,
-            [
-                "1_7_1_2Vselka/English/MAPS.LM0 was made for another version of S1_1_2Voice: 2 of its 3 sounds for that package aren't in S1_1_2Voice.uax, so the package's subtitles aren't matched there."
-            ]
-        );
-        let segments = resolve_segments("S1_1_2Voice.Play_11_38_02", 0x450001, &maps).unwrap();
-        assert_eq!(
-            segments
-                .iter()
-                .map(|segment| segment.id.as_str())
-                .collect::<Vec<_>>(),
-            ["ENGLISH/1_1_2.LS0:100"]
-        );
-        maps.remove(0);
-        assert_eq!(
-            resolve_segments("S1_1_2Voice.Play_11_38_02", 0x450001, &maps).unwrap_err(),
-            "S1_1_2Voice.Play_11_38_02 (key 0x00450001) is only in maps made for another version of its package."
-        );
-    }
-
-    #[test]
     fn finds_audio_in_the_bank_its_map_record_names() {
         // Level 1_3_2 plays a sound from level 1_3_3's package.
         let banks = test_bank(&[0, 100]);
@@ -420,15 +414,48 @@ mod tests {
             }]),
         );
 
-        let segment = resolve_segment(
-            "S1_3_3Voice.Play_13_21_01",
-            7,
-            &records,
-            &banks.iter().collect::<Vec<_>>(),
-        )
-        .unwrap();
+        let maps = test_maps(records, &banks);
+        let segment = resolve_segment("S1_3_3Voice.Play_13_21_01", 7, &maps[0]).unwrap();
 
         assert_eq!(segment.id, "ENGLISH/1_1_2.LS0:100");
+    }
+
+    #[test]
+    fn finds_audio_listed_with_the_maps_sounds() {
+        // Lambert's alarm warning is in `Music_Common.LS0`, which isn't
+        // scanned. The map's voices list it under its resource's key.
+        let mut banks = test_bank(&[0]);
+        let mut voices = banks[0].clone();
+        voices.name = "Voices".to_owned();
+        voices.sound_kind = Some(crate::SoundKind::Voices);
+        voices.path = "ENGLISH/MAPS.LM0".to_owned();
+        voices.segments[0].id = "ENGLISH/MAPS.LM0#1".to_owned();
+        voices.segments[0].source = crate::SegmentSource::MapSound {
+            subsong: 1,
+            key: Some(0x660002),
+            areas: Vec::new(),
+        };
+        banks.push(voices);
+        let mut records = test_records(&[(0x660005, 0)]);
+        let record = records
+            .remove(&0x660005)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        records.insert(
+            0x660005,
+            HashSet::from([MapRecord {
+                resource_key: 0x660002,
+                bank: Some("Music_Common.LS0".to_owned()),
+                ..record
+            }]),
+        );
+
+        let maps = test_maps(records, &banks);
+        let segment = resolve_segment("Lambert.Play_AlarmStage1Opt1", 0x660005, &maps[0]).unwrap();
+
+        assert_eq!(segment.id, "ENGLISH/MAPS.LM0#1");
     }
 
     fn write_u32(data: &mut [u8], position: usize, value: u32) {

@@ -7,7 +7,6 @@ use std::sync::{Mutex, PoisonError, atomic::Ordering};
 
 use serde::Deserialize;
 
-use super::sound_keys;
 use crate::Error;
 
 #[cfg(feature = "uelib-bridge")]
@@ -73,8 +72,6 @@ pub(super) struct BridgeResult {
     pub(super) links: Vec<BridgeLink>,
     #[serde(default)]
     pub(super) issues: Vec<String>,
-    #[serde(default)]
-    pub(super) sound_packages: Vec<sound_keys::SoundPackage>,
     #[serde(default)]
     pub(super) patterns: Vec<BridgePattern>,
     #[cfg(feature = "uelib-bridge")]
@@ -145,32 +142,5 @@ pub(super) fn scan_compiled_links(
     {
         let _ = (game_root, cancelled);
         Err("This build does not include the UELib bridge needed for subtitle matching.".into())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_the_sound_packages_reported_by_the_bridge() {
-        let result: BridgeResult = serde_json::from_str(
-            r#"{
-                "links": [],
-                "issues": [],
-                "soundPackages": [{
-                    "package": "S0_0_2Voice",
-                    "sounds": [{
-                        "name": "Play_00_15_01",
-                        "exportIndex": 40,
-                        "soundMapKey": 3932201,
-                        "lipSyncPath": "\\S0_0_2Voice\\00_15_01.bin"
-                    }]
-                }]
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(result.sound_packages.len(), 1);
     }
 }

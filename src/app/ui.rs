@@ -361,18 +361,19 @@ impl SCModToolApp {
         }
         // Map sounds have names, but no subtitles.
         let is_map_bank = bank.sound_kind.is_some();
+        let has_subtitles = self.has_subtitles(bank);
         ui.horizontal(|ui| {
-            let hint = if is_map_bank {
-                "🔍 Search names, keys and levels"
-            } else {
-                "🔍 Search subtitles and cues"
+            let hint = match (is_map_bank, has_subtitles) {
+                (false, _) => "🔍 Search subtitles and cues",
+                (true, false) => "🔍 Search names, keys and levels",
+                (true, true) => "🔍 Search names, keys, levels and subtitles",
             };
             ui.add(
                 egui::TextEdit::singleline(&mut self.segment_filter)
                     .hint_text(hint)
                     .desired_width(260.0),
             );
-            if !is_map_bank {
+            if has_subtitles {
                 egui::ComboBox::from_id_salt("text-filter")
                     .selected_text(self.text_filter.label())
                     .show_ui(ui, |ui| {
@@ -403,8 +404,13 @@ impl SCModToolApp {
             .column(Column::auto().at_least(36.0))
             .column(Column::auto().at_least(64.0))
             .column(Column::auto().at_least(64.0))
-            .column(Column::auto().at_least(80.0))
-            .column(Column::remainder().clip(true));
+            .column(Column::auto().at_least(80.0));
+        // Map sounds' names come before their subtitles, when they have any.
+        let map_subtitles = is_map_bank && has_subtitles;
+        if map_subtitles {
+            table = table.column(Column::auto().at_least(120.0).clip(true));
+        }
+        table = table.column(Column::remainder().clip(true));
         if scroll_to_selection
             && let Some(row) = self
                 .selected_segment
@@ -413,14 +419,14 @@ impl SCModToolApp {
             table = table.scroll_to_row(row, None);
         }
 
-        let titles = if is_map_bank {
-            ["", "#", "Duration", "Used in", "Key", "Name"]
-        } else {
-            ["", "#", "Duration", "Size", "Offset", "Subtitle"]
+        let titles: &[&str] = match (is_map_bank, map_subtitles) {
+            (false, _) => &["", "#", "Duration", "Size", "Offset", "Subtitle"],
+            (true, false) => &["", "#", "Duration", "Used in", "Key", "Name"],
+            (true, true) => &["", "#", "Duration", "Used in", "Key", "Name", "Subtitle"],
         };
         table
             .header(22.0, |mut header| {
-                for title in titles {
+                for &title in titles {
                     header.col(|ui| {
                         ui.strong(title);
                     });
@@ -468,6 +474,9 @@ impl SCModToolApp {
                                         .truncate(),
                                 );
                             });
+                            if map_subtitles {
+                                row.col(|ui| subtitle_cell(ui, self.subtitles.get(&segment.id)));
+                            }
                         }
                         SegmentSource::Stream {
                             offset,
@@ -573,8 +582,8 @@ impl SCModToolApp {
                                 detail_row(ui, "File", bank.path.clone());
                             });
 
-                        // Map sounds have no subtitles, but list where they're
-                        // played.
+                        // Map sounds list where they're played, and only the
+                        // few that are dialogue have subtitles.
                         if let SegmentSource::MapSound { areas, .. } = &segment.source {
                             ui.add_space(8.0);
                             ui.separator();
@@ -582,7 +591,9 @@ impl SCModToolApp {
                             for area in areas {
                                 ui.label(area);
                             }
-                            return;
+                            if !self.subtitles.contains_key(&segment.id) {
+                                return;
+                            }
                         }
                         ui.add_space(8.0);
                         ui.separator();
@@ -614,7 +625,7 @@ impl SCModToolApp {
             .show(ctx, |ui| {
                 ui.label(
                     RichText::new(
-                        "Script references that could not be matched to a segment and subtitle, and sound keys that were corrected.",
+                        "Script references that could not be matched to a segment and subtitle.",
                     )
                     .weak(),
                 );
@@ -633,30 +644,8 @@ impl SCModToolApp {
             return Vec::new();
         };
         let query = self.segment_filter.trim().to_lowercase();
-        if bank.sound_kind.is_some() {
-            // Map sounds have names, keys and the areas that play them
-            // instead of subtitles.
-            return bank
-                .segments
-                .iter()
-                .enumerate()
-                .filter(|(_, segment)| {
-                    let SegmentSource::MapSound { key, areas, .. } = &segment.source else {
-                        return false;
-                    };
-                    query.is_empty()
-                        || segment
-                            .name
-                            .as_deref()
-                            .is_some_and(|name| name.to_lowercase().contains(&query))
-                        || format_key(*key).to_lowercase().contains(&query)
-                        || areas
-                            .iter()
-                            .any(|area| area.to_lowercase().contains(&query))
-                })
-                .map(|(index, _)| index)
-                .collect();
-        }
+        // The text filter is only offered for banks with subtitles.
+        let filters_text = self.has_subtitles(bank);
         bank.segments
             .iter()
             .enumerate()
@@ -664,25 +653,49 @@ impl SCModToolApp {
                 let subtitles = self.subtitles.get(&segment.id);
                 let has_text =
                     subtitles.is_some_and(|subtitles| subtitles.iter().any(Subtitle::has_text));
-                let shown = match self.text_filter {
-                    TextFilter::All => true,
-                    TextFilter::WithText => has_text,
-                    TextFilter::WithoutText => !has_text,
+                let shown = !filters_text
+                    || match self.text_filter {
+                        TextFilter::All => true,
+                        TextFilter::WithText => has_text,
+                        TextFilter::WithoutText => !has_text,
+                    };
+                let subtitle_matches = subtitles.is_some_and(|subtitles| {
+                    subtitles.iter().any(|subtitle| {
+                        subtitle
+                            .text
+                            .as_deref()
+                            .is_some_and(|text| text.to_lowercase().contains(&query))
+                            || subtitle.cue.to_lowercase().contains(&query)
+                    })
+                });
+                // Map sounds can also be found by name, key and level.
+                let sound_matches = match &segment.source {
+                    SegmentSource::MapSound { key, areas, .. } => {
+                        segment
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| name.to_lowercase().contains(&query))
+                            || format_key(*key).to_lowercase().contains(&query)
+                            || areas
+                                .iter()
+                                .any(|area| area.to_lowercase().contains(&query))
+                    }
+                    SegmentSource::Stream { .. } => false,
                 };
-                shown
-                    && (query.is_empty()
-                        || subtitles.is_some_and(|subtitles| {
-                            subtitles.iter().any(|subtitle| {
-                                subtitle
-                                    .text
-                                    .as_deref()
-                                    .is_some_and(|text| text.to_lowercase().contains(&query))
-                                    || subtitle.cue.to_lowercase().contains(&query)
-                            })
-                        }))
+                shown && (query.is_empty() || subtitle_matches || sound_matches)
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// Whether any of the bank's segments has a subtitle. `.LS0` banks are
+    /// treated as having them, since that's what they're for.
+    fn has_subtitles(&self, bank: &Bank) -> bool {
+        bank.sound_kind.is_none()
+            || bank
+                .segments
+                .iter()
+                .any(|segment| self.subtitles.contains_key(&segment.id))
     }
 
     fn find_segment(&self, id: &str) -> Option<(&Bank, &Segment)> {

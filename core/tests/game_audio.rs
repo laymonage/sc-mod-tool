@@ -65,11 +65,27 @@ fn decodes_every_discovered_game_segment() {
             );
         }
         if language.directory.eq_ignore_ascii_case("ENGLISH") {
-            // These packages store scrambled sound keys; the segments were
-            // confirmed by listening.
-            // The last two are spoken face to face, so the game doesn't show
-            // them; their text comes from the pattern's localization section.
+            // These sounds' events play audio filed under other keys in
+            // MAPS.LM0, or audio listed with the map's sounds.
+            // Those matched by section order are spoken face to face, so the
+            // game doesn't show them; their text comes from the pattern's
+            // localization section.
             for (segment_id, cue, confidence) in [
+                // Lambert's alarm warning, in Music_Common.LS0, the longest
+                // of the three.
+                (
+                    "ENGLISH/MAPS.LM0#1",
+                    "Speech_0001L",
+                    MappingConfidence::ExplicitCompiledReference,
+                ),
+                // "Of course.", whose event plays its neighbour's resource:
+                // the 1.7-second clip, not the 4.7-second one.
+                (
+                    "ENGLISH/2_2_1.LS0:1912308",
+                    "Speech_0008L",
+                    MappingConfidence::ExplicitCompiledReference,
+                ),
+                // These were confirmed by listening.
                 (
                     "ENGLISH/0_0_2.LS0:449196",
                     "Speech_0012L",

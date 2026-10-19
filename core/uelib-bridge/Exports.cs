@@ -218,11 +218,7 @@ public static unsafe class Exports
             patternResults.Add(new PatternResult(pattern.ClassName, pattern.SourcePackage, calls.ToArray()));
         }
 
-        return new BridgeResult(
-            links,
-            issues,
-            soundPackages.Values.OfType<SoundPackage>().ToArray(),
-            patternResults);
+        return new BridgeResult(links, issues, patternResults);
     }
 
     private static IEnumerable<string> FindScriptPackages(string systemRoot)
@@ -276,7 +272,7 @@ public static unsafe class Exports
         return null;
     }
 
-    /// <summary>Reads every sound in a package, keeping each one's export position.</summary>
+    /// <summary>Reads every sound in a package.</summary>
     private static SoundPackage ReadSoundPackage(string path)
     {
         var bytes = File.ReadAllBytes(path);
@@ -284,9 +280,8 @@ public static unsafe class Exports
         package.InitializePackage(UnrealPackage.InitFlags.Construct | UnrealPackage.InitFlags.RegisterClasses);
 
         var sounds = new Dictionary<string, SoundEntry>(StringComparer.OrdinalIgnoreCase);
-        for (var index = 0; index < package.Exports.Count; index++)
+        foreach (var export in package.Exports)
         {
-            var export = package.Exports[index];
             if (export.Class?.ObjectName.ToString() != "Sound")
             {
                 continue;
@@ -294,19 +289,18 @@ public static unsafe class Exports
 
             var name = export.ObjectName.ToString();
             uint? key = null;
-            string? lipSyncPath = null;
             if (export.SerialOffset >= 0
                 && export.SerialSize > 0
                 && export.SerialOffset <= bytes.Length - export.SerialSize
                 && SoundData.TryRead(
                     bytes.AsSpan(export.SerialOffset, export.SerialSize),
                     out var storedKey,
-                    out lipSyncPath))
+                    out _))
             {
                 key = storedKey;
             }
 
-            sounds.TryAdd(name, new SoundEntry(name, index, key, lipSyncPath));
+            sounds.TryAdd(name, new SoundEntry(name, key));
         }
 
         return new SoundPackage(Path.GetFileNameWithoutExtension(path), path, sounds);
@@ -373,35 +367,6 @@ public static unsafe class Exports
                 writer.WriteEndObject();
             }
             writer.WriteEndArray();
-            writer.WritePropertyName("soundPackages");
-            writer.WriteStartArray();
-            foreach (var soundPackage in result.SoundPackages)
-            {
-                writer.WriteStartObject();
-                writer.WriteString("package", soundPackage.Name);
-                writer.WritePropertyName("sounds");
-                writer.WriteStartArray();
-                foreach (var sound in soundPackage.Sounds.Values.OrderBy(sound => sound.ExportIndex))
-                {
-                    if (sound.Key is not { } key)
-                    {
-                        continue;
-                    }
-
-                    writer.WriteStartObject();
-                    writer.WriteString("name", sound.Name);
-                    writer.WriteNumber("exportIndex", sound.ExportIndex);
-                    writer.WriteNumber("soundMapKey", key);
-                    if (sound.LipSyncPath is not null)
-                    {
-                        writer.WriteString("lipSyncPath", sound.LipSyncPath);
-                    }
-                    writer.WriteEndObject();
-                }
-                writer.WriteEndArray();
-                writer.WriteEndObject();
-            }
-            writer.WriteEndArray();
             writer.WriteEndObject();
             writer.Flush();
         }
@@ -456,7 +421,6 @@ public static unsafe class Exports
     private sealed record BridgeResult(
         IReadOnlyList<BridgeLink> Links,
         IReadOnlyList<string> Issues,
-        IReadOnlyList<SoundPackage> SoundPackages,
         IReadOnlyList<PatternResult> Patterns);
 
     private sealed record PatternCalls(string ClassName, string SourcePackage, List<PatternCall> Calls);
@@ -475,5 +439,5 @@ public static unsafe class Exports
 
     private sealed record SoundPackage(string Name, string Path, IReadOnlyDictionary<string, SoundEntry> Sounds);
 
-    private sealed record SoundEntry(string Name, int ExportIndex, uint? Key, string? LipSyncPath);
+    private sealed record SoundEntry(string Name, uint? Key);
 }

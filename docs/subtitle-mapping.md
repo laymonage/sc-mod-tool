@@ -16,8 +16,8 @@ four pieces:
 1. **Scripts** (`system/*.u`) play each line by naming a `Sound` object, and for
    radio messages also name the subtitle cue.
 2. **Sound packages** (`Sounds/*.uax`) give each `Sound` object a numeric key.
-3. **The map** (`Sounds/<language>/MAPS.LM0`) gives each key a bank file, offset
-   and length.
+3. **The map** (`Sounds/<language>/MAPS.LM0`) has an event for each key, which
+   points at a resource: a bank file, offset and length.
 4. **Localization files** (`system/LOCALIZATION/*.int` and so on) hold the text.
 
 Two kinds of subtitle come out of this:
@@ -28,14 +28,12 @@ Two kinds of subtitle come out of this:
   is the line at the same position in the localization section named after the
   scene. The app labels these "Not shown in game".
 
-On top of that, a few sound packages store wrong keys, which are corrected using
-lip-sync data.
-
 Result for English: 1085 of 1089 segments are matched to a line. 899 of them
 have text; 186 are matched only to lines whose text is a `(null)` placeholder,
 which the app shows as "No text". The remaining 4 segments have no line at all
 (see [What's left](#whats-left)). These numbers are for the language's own
-folder; the [extra maps](#extra-maps-soundsmaplanguage) add more.
+folder; the [extra maps](#extra-maps-soundsmaplanguage) and a few of the map's
+own sounds add more.
 
 ## The files
 
@@ -69,38 +67,47 @@ language folder's in two ways:
 The app lists these banks under the language, grouped by map. They hold the
 only copies of mission 3 audio (`S3_*` packages) in this release.
 
-**Another version of `S3_1_1Voice`.** The Vselka maps were made with a
-different version of `S3_1_1Voice` than the game ships. The game's
-`S3_1_1Voice.uax` has sounds `0x450000`–`0x450070`, but
-`1_7_1_1VselkaInfiltration`'s map files 60 sounds under the package's ID, 54 of
-them numbered past the end of that range. The keys that do overlap point at
-other lines: the map's `0x45006F` clip is 0.69 s, but the lip-sync file for
-`Play_31_38_02`, which the game's package gives that key, is 1.74 s. Matching
-those keys put Lambert's "GPS shows you're within a stone's throw…" on a 3-second
-clip.
-
-So when most of a map's records under a package's ID are for sounds the package
-doesn't have, that package isn't matched in that map, with a warning
-(`mark_foreign_packages`). This only affects `S3_1_1Voice` in the two Vselka
-maps, and `Lambert`, which doesn't match in any map. Every other match in the
-extra maps that has a lip-sync file agrees with it.
+**Different resource keys.** The Vselka maps file `S3_1_1Voice`'s audio under
+other resource keys than the language folder's map: `1_7_1_1VselkaInfiltration`
+has 54 of its 60 resources for the package numbered past the package's last
+sound, `0x450070`. Their events still use the package's keys, so matching
+through the events finds them. Before events were read, these lines couldn't be
+matched at all, and the keys that did overlap pointed at other lines.
 
 ### The map: `Sounds/<language>/MAPS.LM0`
 
-A table of 128-byte records, one per sound. The fields used:
+The map is split into areas, one per level plus `fix` and `menu`. Each area has
+a list of **events**, which the game plays, and a list of **resources**, which
+describe the audio. The keys the sound packages store are event keys. An event
+plays a resource by its index in the area's list, so the game never looks a
+resource up by key.
 
-| Offset | Field |
-|---|---|
-| `+0` | Key: `(package ID << 16) \| sound ID` |
-| `+4`, `+8` | Both `1` in every record used |
-| `+12` | Stream size in bytes, repeated at `+52` |
-| `+20` | Offset of the stream in its bank |
-| `+48` | Sample count |
-| `+68` | Sample rate (36000) |
-| `+80` | Bank file name, such as `1_3_2.LS0`, null-terminated, up to 32 bytes |
+All offsets are little-endian 32-bit values:
 
-The parser finds records by scanning every 4-byte position for this shape
-(`parse_map_records` in [`map.rs`](../core/src/subtitles/map.rs)).
+| Where | Offset | Field |
+|---|---|---|
+| File | `+0` | Version, `7` |
+| | `+4`, `+8` | Offset and number of areas |
+| Area entry (`0x30` bytes) | `+8` | Offset of the area's header |
+| | `+16` | Area name, such as `1_1_0Tbilisi` |
+| Area header | `+4`, `+8` | Offset (from the header) and number of events |
+| | `+12`, `+16` | Offset (from the header) and number of resources |
+| Event (`0x58` bytes) | `+0` | Key: `(package ID << 16) \| sound ID` |
+| | `+8` | `0x40000000` \| the resource's index in the area |
+| Resource (`0x80` bytes) | `+0` | The resource's own key |
+| | `+4` | Type: `1` for a clip of audio |
+| | `+12` | Stream size in bytes, repeated at `+52` |
+| | `+20` | Offset of the stream in its bank |
+| | `+48` | Sample count |
+| | `+68` | Sample rate (36000) |
+| | `+80` | Bank file name, such as `1_3_2.LS0`, null-terminated, up to 32 bytes |
+
+Only events pointing at audio resources (type `1`) are used, as in vgmstream.
+The other types, `4`, `8` and `10`, aren't dialogue. Parsed in
+`parse_map_records` in [`map.rs`](../core/src/subtitles/map.rs).
+
+An event's key is usually its resource's key too, but not always; see
+[Events and resources](#events-and-resources).
 
 **Use the bank name in the record.** A level can play a sound from another
 level's package: level 1_3_2 plays `S1_3_3Voice.Play_13_21_01`, whose audio is
@@ -116,19 +123,8 @@ Each `Sound` export's serialized data is:
 3. for lip-synced sounds: a 32-bit `1`, then a length-prefixed, null-terminated
    path such as `\S0_0_2Voice\00_15_01.bin`
 
-Parsed in [`SoundData.cs`](../core/uelib-bridge/SoundData.cs).
-
-### Lip-sync files: `LIPSYNCH/int/<package>/<line>.bin`
-
-One file per lip-synced sound, named after it without the `Play_` prefix
-(`Play_00_15_01` → `00_15_01.bin`). The 32-bit value at `+8` is the line's
-duration in milliseconds. Only English (`int`) lip-sync data ships, so it's
-compared against English clip lengths.
-
-These durations are the only independent record of which audio belongs to which
-sound, which is what makes them useful for correcting keys. They're not
-perfect: some lines were re-recorded after the lip-sync was made (see
-[Known quirks](#known-quirks)).
+Parsed in [`SoundData.cs`](../core/uelib-bridge/SoundData.cs). Only the key
+is used.
 
 ### Scripts: `system/*.u`
 
@@ -179,20 +175,20 @@ Speech_0021L=Um...Okay.
 ## Matching
 
 All of this happens once per game when subtitles are first loaded, in
-[`load_verified_subtitles`](../core/src/subtitles.rs). The UELib analysis and key
-corrections don't depend on language, so they're cached and reused when
-switching languages.
+[`load_verified_subtitles`](../core/src/subtitles.rs). The UELib analysis doesn't
+depend on language, so it's cached and reused when switching languages.
 
 ### Subtitles shown in game
 
-For each `Localize` + `Sound` pair: correct the sound's key if needed, look the
-key up in `MAPS.LM0`, find the segment in the named bank with the same offset,
-size and sample count, and read the cue's text from the language's localization
-file. 390 of the 657 pairs match a segment in English: 381 in the language
-folder and 9 in the extra maps. Almost all of the rest are mission 3 lines
-(`S3_*` packages). The extra maps only ship the mission 3 sounds their own
-levels use, and the Vselka maps' `S3_1_1Voice` sounds can't be matched (see
-[Extra maps](#extra-maps-soundsmaplanguage)).
+For each `Localize` + `Sound` pair: find the event with the sound's key in
+`MAPS.LM0`, follow it to its resource, find the segment in the named bank with
+the same offset, size and sample count, and read the cue's text from the
+language's localization file. Audio outside the numeric banks, such as
+Lambert's alarm warnings in `Music_Common.LS0`, isn't scanned, so it's matched
+to the map sound with the resource's key instead (see the app's "Voices" banks).
+421 of the 657 pairs match a segment in English. Most of the rest are mission 3
+lines (`S3_*` packages) whose audio this release doesn't ship, or whose
+localization files it doesn't ship (see [What's left](#whats-left)).
 
 ### Subtitles not shown in game
 
@@ -224,34 +220,36 @@ plays. Skipping it gives rates of 17, 13 and 16 characters per second; any other
 choice puts "Whats that?" on a 2.2-second clip at 4.5 characters per second.
 
 Every scene with a localization section now lines up, in both English and
-German: 734 lines not shown in game are matched in each.
+German: 734 lines not shown in game are matched in each language's folder, and
+the extra maps add 91 in English.
 
-## Correcting scrambled sound keys
+## Events and resources
 
-In a few packages, the key stored in a `Sound` object points at the wrong audio.
-The names and lip-sync paths in those objects are right; only the keys are
-wrong, and the game must work around it internally. Lip-sync durations, bank
-order and listening all agree on the correct keys.
+An event's key is usually its resource's key too, but not always: in 21 of the
+English map's packages, some events play a resource with another key. The game
+always goes through the event, so this never shows in game, but matching a
+sound's key straight to a resource key puts those lines on the wrong clips.
+Some examples:
 
-[`sound_keys.rs`](../core/src/sound_keys.rs) applies four corrections, in this
-order. The first three need lip-sync durations (within 0.15 s) to clearly
-favour the change over the stored keys:
+- `S0_0_2Voice`'s events `0x00`–`0x29` play their resources in reverse order,
+  so the training lines "All right, Fisher, we'll get through this…" and "We'll
+  let you do your thing here…" would land on the intro cutscene's "I like to
+  be early. Hello Colonel." and "Sam Fisher. I can't believe you beat me here."
+- `S1_1_1Voice`'s `Play_11_10_01` was added late: its event, `0x41`, plays
+  resource `0x10`.
+- `S2_2_1Voice`'s Mafioso lines play each other's resources in pairs, so
+  "Of course." would be shown on a 4.7-second clip, and "Thank god. Make sure
+  you leave…" on a 1.7-second one.
+- `S2_1_2Voice`'s events `0x68`–`0x6D` play their resources in a small
+  rotation, such as `0x6C` playing `0x68`.
+- The Vselka maps number `S3_1_1Voice`'s resources differently from the
+  language folder's map (see [Extra maps](#extra-maps-soundsmaplanguage)).
 
-| Kind | What's wrong | Found in |
-|---|---|---|
-| Reversed run | A run of consecutive keys was assigned in reverse name order | `S0_0_2Voice` (`0x00`–`0x29`, 41 sounds), `S2_2_2Voice` (`0x5D`–`0x62`) |
-| Swapped pair | Two neighbouring exports have each other's keys | `S1_1_2Voice` (`Play_11_28_09` ↔ `Play_11_32_27`), `S2_1_1Voice` (`Play_21_15_01` ↔ `Play_21_16_01`) |
-| Shifted onto a free key | A sound's audio is under the next key, which no sound owns | `S2_1_2Voice` (`Play_21_96_01`: `0x6D` → `0x6E`) |
-| Late addition | A sound added last points at a key with no audio, while its audio sits under the package's only key that no sound owns. Applied only when there's exactly one of each. | `S1_1_1Voice` (`Play_11_10_01`: `0x41` → `0x10`), `S2_1_2Voice` (`Play_21_10_18`: `0x6C` → `0x6D`) |
-
-Each correction is listed in the app's warnings window. Without them, for
-example, the stored keys of the training lines "All right, Fisher, we'll get
-through this…" and "We'll let you do your thing here…" point at the intro
-cutscene's "I like to be early. Hello Colonel." and "Sam Fisher. I can't
-believe you beat me here.", so those subtitles landed on the wrong clips.
-
-Lip-sync alone isn't trusted for single sounds: in three places the lip-sync file
-is simply out of date (below), and the stored key is right.
+Before events were read, the tool matched keys straight to resources, and
+guessed fixes for a few packages from lip-sync durations, which only some lines
+have. Reading the events moved 14 more English lines onto other clips,
+all in pairs or runs without lip-sync, including the Mafioso lines above. In
+every pair whose lines differ in length, the clip lengths now fit the text.
 
 ## Known quirks
 
@@ -287,19 +285,25 @@ segments", "With text", "Without text") and status bar distinguish:
 The lines without text are still useful: each one is a known line in a known
 scene, with its cue name and audio, ready for text to be written later.
 
-The extra maps add 134 English segments: 10 with text, 47 with lines without
-text, and 77 with no line. Most of the 77 are the Vselka maps' `S3_1_1Voice`
-sounds, which use another version of the package's keys. German has no extra
-map folders.
+The extra maps add 134 English segments: 31 with text, 90 with lines without
+text, and 13 with no line. Those 13 are `1_7_1_1VselkaInfiltration/English/3_1_1.LS0`
+#25–#37, which the map's events play but no script line or localization
+section covers. German has no extra map folders.
+
+The map's own sounds add Lambert's lines in `Music_Common.LS0`: the three alarm
+warnings and "My God, Fisher! Have you gone insane?" in the language folder's
+map, and the alarm warnings again in each extra map. That's 13 sounds with
+subtitles in English and 4 in German.
 
 Mission 3's own scenes (`P_3_4_1Severonickel` to `P_3_4_4Severonickel`) cue
 radio messages from localization files this release doesn't ship, so each
 language with extra maps gets four "Localization file … was not found"
 warnings. Their 28 cues point at 16 segments. 15 of those are in
 `1_6_1_1kolacell`, whose own scenes play the same sounds and do have
-localization, so they get their lines from there. The one left is
-`1_7_1_2Vselka/English/3_4_3.LS0` #1 (`Play_34_64_02`), one of the 77 with no
-line.
+localization, so they get their lines from there. The one left,
+`1_7_1_2Vselka/English/3_4_3.LS0` #1, gets its line from another scene: its
+event is `Play_34_61_11` ("Watch out Fisher…"), not `Play_34_64_02`, the sound
+whose key its resource has.
 
 The 4 segments with no line in any localization file:
 
@@ -309,10 +313,6 @@ The 4 segments with no line in any localization file:
 | `2_1_1.LS0` #24 | The muffled far end of the CIA phone call. Its scene's section has one line, for the side you hear directly (#23). |
 
 No scene is skipped in either language.
-
-The key corrections only work where lip-sync data or the "one of each" rule
-applies. A package with scrambled keys and no lip-synced sounds nearby would go
-unnoticed, though none is known.
 
 ## Checking the results
 
@@ -325,7 +325,8 @@ cargo test -p sc-mod-tool-core --test game_audio -- --ignored --nocapture
 ```
 
 When changing the matching, run it and compare its summary line (currently
-"899 segments with text and 186 with lines that have no text" for English) and the warnings it prints. A new rule that
+"943 segments with text and 276 with lines that have no text" for English,
+including the extra maps and map sounds) and the warnings it prints. A new rule that
 moves a confirmed line will fail the test.
 
 To check a match by ear, open the bank in the app and play the segment. A
