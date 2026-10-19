@@ -114,8 +114,8 @@ impl SCModToolApp {
     }
 
     fn show_top_bar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        egui::Panel::top("top-bar").show(ui, |ui| {
-            ui.add_space(6.0);
+        let panel = egui::Panel::top("top-bar").frame(bar_frame(ui.style(), 8));
+        panel.show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("SC Mod Tool").strong().size(16.0));
                 ui.separator();
@@ -174,13 +174,12 @@ impl SCModToolApp {
                     }
                 });
             });
-            ui.add_space(4.0);
         });
     }
 
     fn show_status_bar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        egui::Panel::bottom("status-bar").show(ui, |ui| {
-            ui.add_space(2.0);
+        let panel = egui::Panel::bottom("status-bar").frame(bar_frame(ui.style(), 4));
+        panel.show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if !self.subtitle_warnings.is_empty()
@@ -268,7 +267,6 @@ impl SCModToolApp {
                     });
                 });
             });
-            ui.add_space(2.0);
         });
     }
 
@@ -306,7 +304,7 @@ impl SCModToolApp {
         } else {
             ICON_PAUSE
         };
-        if ui.button(pause_icon).clicked() {
+        if ui.button(pause_icon.codepoint).clicked() {
             actions.push(Action::TogglePause);
         }
     }
@@ -528,7 +526,7 @@ impl SCModToolApp {
                             (ICON_PLAY_ARROW, "Play")
                         };
                         if ui
-                            .add(egui::Button::new(icon).frame(false))
+                            .add(egui::Button::new(icon.codepoint).frame(false))
                             .on_hover_text(hint)
                             .clicked()
                         {
@@ -938,6 +936,12 @@ fn detail_row(ui: &mut egui::Ui, name: &str, value: String) {
     ui.label(RichText::new(name).weak());
     ui.label(value);
     ui.end_row();
+}
+
+/// A top or bottom bar's frame, with the same space above and below its
+/// contents.
+fn bar_frame(style: &egui::Style, vertical_margin: i8) -> egui::Frame {
+    egui::Frame::side_top_panel(style).inner_margin(egui::Margin::symmetric(8, vertical_margin))
 }
 
 /// Formats seconds as `m:ss`.
