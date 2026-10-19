@@ -565,6 +565,7 @@ impl SCModToolApp {
                             subsong,
                             key,
                             ref areas,
+                            ..
                         } => {
                             row.col(|ui| {
                                 ui.label(areas.len().to_string())
@@ -687,12 +688,26 @@ impl SCModToolApp {
                                         );
                                         detail_row(ui, "Offset", offset.to_string());
                                     }
-                                    SegmentSource::MapSound { subsong, key, .. } => {
+                                    SegmentSource::MapSound {
+                                        subsong,
+                                        key,
+                                        pitch,
+                                        ..
+                                    } => {
                                         if let Some(name) = &segment.name {
                                             detail_row(ui, "Name", name.clone());
                                         }
                                         detail_row(ui, "Key", format_key(key));
                                         detail_row(ui, "Map entry", subsong.to_string());
+                                        // The game pitches some voices down;
+                                        // the sample rate above includes it.
+                                        if pitch != 0x1_0000 {
+                                            detail_row(
+                                                ui,
+                                                "Pitch",
+                                                format!("{:.2}×", f64::from(pitch) / 65536.0),
+                                            );
+                                        }
                                     }
                                 }
                                 detail_row(ui, "File", bank.path.clone());
@@ -849,6 +864,7 @@ impl SCModToolApp {
                 subsong,
                 key,
                 areas,
+                ..
             } => (Some(*subsong), *key, Some(areas.len())),
             SegmentSource::Stream { .. } => (None, None, None),
         };

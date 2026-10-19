@@ -1,6 +1,7 @@
 mod banks;
 pub mod decoder;
 mod error;
+mod sound_map_file;
 mod sounds_folder;
 pub mod subtitles;
 mod vgmstream;
@@ -76,6 +77,10 @@ pub enum SegmentSource {
         /// The map's areas that play the sound, such as `1_1_0Tbilisi`, one
         /// for each level plus `fix` and `menu`.
         areas: Vec<String>,
+        /// The pitch the game plays the sound at, as a 16.16 fixed-point
+        /// multiple of its stored sample rate. The segment's `sample_rate` is
+        /// already pitched.
+        pitch: u32,
     },
 }
 
@@ -108,9 +113,9 @@ pub fn decode_segment(
             let bytes = read_segment_with_cancel(root, bank_path, offset, byte_length, cancelled)?;
             decoder::decode(&bytes, segment.sample_count, cancelled)
         }
-        SegmentSource::MapSound { subsong, .. } => {
+        SegmentSource::MapSound { subsong, pitch, .. } => {
             let sounds = find_sounds_directory(root)?;
-            decoder::decode_map_sound(&sounds, bank_path, subsong, cancelled)
+            decoder::decode_map_sound(&sounds, bank_path, subsong, pitch, cancelled)
         }
     }
 }

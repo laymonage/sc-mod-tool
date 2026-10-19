@@ -1,14 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-/// The sizes of a map's area entries, events and resources.
-const AREA_SIZE: usize = 0x30;
-const EVENT_SIZE: usize = 0x58;
-const RESOURCE_SIZE: usize = 0x80;
-/// The top bits of an event's reference to a resource. The rest is the
-/// resource's index in its area.
-const RESOURCE_REFERENCE: u32 = 0x4000_0000;
-/// The type of a resource that's a clip of audio.
-const AUDIO: u32 = 1;
+use crate::sound_map_file::{AUDIO, SoundMapFile, read_u32};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MapRecord {
@@ -53,48 +45,20 @@ pub(super) fn clip_seconds(key: u32, maps: &[SoundMap]) -> Option<f64> {
 
 /// Reads a `MAPS.LM0`'s audio, by the keys of the events that play it.
 ///
-/// The map is split into areas, one for each level plus `fix` and `menu`.
-/// Each area has a list of events, whose keys are what the game's sound
-/// packages store, and a list of resources, which describe the audio. An event
-/// plays a resource by its index in the area's list. The event's key is
-/// usually the resource's too, but not always: in some packages a run of
-/// events plays its resources in reverse order, for example.
+/// An event's key is usually its resource's too, but not always: in some
+/// packages a run of events plays its resources in reverse order, for example.
+/// Dialogue's events point straight at its audio, so containers, which
+/// characters' barks are chosen through, aren't followed.
 pub(crate) fn parse_map_records(data: &[u8]) -> Result<HashMap<u32, HashSet<MapRecord>>, String> {
-    let unreadable = || "isn't a sound map this tool can read".to_owned();
-    if read_u32(data, 0) != Some(7) {
-        return Err(unreadable());
-    }
-    let areas_offset = read_u32(data, 4).ok_or_else(unreadable)? as usize;
-    let area_count = read_u32(data, 8).ok_or_else(unreadable)? as usize;
-
+    let map = SoundMapFile::parse(data)?;
     let mut records = HashMap::<u32, HashSet<MapRecord>>::new();
-    for area in 0..area_count {
-        let entry = area
-            .checked_mul(AREA_SIZE)
-            .and_then(|offset| offset.checked_add(areas_offset))
-            .ok_or_else(unreadable)?;
-        let area_offset = read_u32(data, entry + 8).ok_or_else(unreadable)? as usize;
-        let section = |field: usize| -> Option<(usize, usize)> {
-            let offset = area_offset.checked_add(read_u32(data, area_offset + field)? as usize)?;
-            let count = read_u32(data, area_offset + field + 4)? as usize;
-            Some((offset, count))
-        };
-        let (events_offset, event_count) = section(4).ok_or_else(unreadable)?;
-        let (resources_offset, resource_count) = section(0xc).ok_or_else(unreadable)?;
-
-        for event in 0..event_count {
-            let event = events_offset + event * EVENT_SIZE;
-            let (Some(key), Some(reference)) = (read_u32(data, event), read_u32(data, event + 8))
-            else {
-                return Err(unreadable());
-            };
-            let index = (reference & 0x0FFF_FFFF) as usize;
-            if reference & 0xF000_0000 != RESOURCE_REFERENCE || index >= resource_count {
-                continue;
-            }
-            if let Some(record) = read_audio_record(data, resources_offset + index * RESOURCE_SIZE)
+    for area in map.areas() {
+        for event in map.events(area) {
+            if let Some(record) = event
+                .resource
+                .and_then(|resource| read_audio_record(data, resource))
             {
-                records.entry(key).or_default().insert(record);
+                records.entry(event.key).or_default().insert(record);
             }
         }
     }
@@ -128,11 +92,6 @@ fn read_bank_name(data: &[u8], position: usize) -> Option<String> {
     let field = data.get(position..position.checked_add(32)?)?;
     let name = &field[..field.iter().position(|byte| *byte == 0)?];
     (!name.is_empty() && name.is_ascii()).then(|| String::from_utf8_lossy(name).into_owned())
-}
-
-fn read_u32(data: &[u8], position: usize) -> Option<u32> {
-    let bytes = data.get(position..position.checked_add(4)?)?;
-    Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
 /// Finds a sound's segment in every map that has it. Extra maps ship their own
@@ -248,48 +207,22 @@ fn sound_package_bank_code(sound_event: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sound_map_file::tests::{TestResource, write_u32};
+    use crate::sound_map_file::{self, AREA_SIZE, EVENT_SIZE, NORMAL_PITCH};
     use crate::subtitles::tests::{test_bank, test_maps, test_records};
 
     /// A map with one area, whose events play the resources at the given
     /// indexes, each an audio clip with the given key at offset `key * 100`.
     fn test_map(events: &[(u32, u32)], resource_keys: &[u32]) -> Vec<u8> {
-        let area = 0x0c + AREA_SIZE;
-        let events_offset = 0x24;
-        let resources_offset = events_offset + events.len() * EVENT_SIZE;
-        let mut data = vec![0; area + resources_offset + resource_keys.len() * RESOURCE_SIZE];
-        for (position, value) in [(0, 7), (4, 0x0c), (8, 1), (0x0c + 8, area as u32)] {
-            write_u32(&mut data, position, value);
-        }
-        for (field, value) in [
-            (4, events_offset),
-            (8, events.len()),
-            (0xc, resources_offset),
-            (0x10, resource_keys.len()),
-        ] {
-            write_u32(&mut data, area + field, value as u32);
-        }
-        for (index, (key, resource)) in events.iter().enumerate() {
-            let event = area + events_offset + index * EVENT_SIZE;
-            write_u32(&mut data, event, *key);
-            write_u32(&mut data, event + 8, RESOURCE_REFERENCE | resource);
-        }
-        for (index, key) in resource_keys.iter().enumerate() {
-            let resource = area + resources_offset + index * RESOURCE_SIZE;
-            for (field, value) in [
-                (0, *key),
-                (4, AUDIO),
-                (8, 1),
-                (12, 15_571),
-                (20, key * 100),
-                (48, 29_967),
-                (52, 15_571),
-                (68, 36_000),
-            ] {
-                write_u32(&mut data, resource + field, value);
-            }
-            data[resource + 80..resource + 89].copy_from_slice(b"0_0_2.LS0");
-        }
-        data
+        let events: Vec<_> = events
+            .iter()
+            .map(|&(key, resource)| (key, resource, NORMAL_PITCH))
+            .collect();
+        let resources: Vec<_> = resource_keys
+            .iter()
+            .map(|&key| TestResource::Audio(key))
+            .collect();
+        sound_map_file::tests::test_map(&events, &resources)
     }
 
     #[test]
@@ -434,6 +367,7 @@ mod tests {
             subsong: 1,
             key: Some(0x660002),
             areas: Vec::new(),
+            pitch: NORMAL_PITCH,
         };
         banks.push(voices);
         let mut records = test_records(&[(0x660005, 0)]);
@@ -456,9 +390,5 @@ mod tests {
         let segment = resolve_segment("Lambert.Play_AlarmStage1Opt1", 0x660005, &maps[0]).unwrap();
 
         assert_eq!(segment.id, "ENGLISH/MAPS.LM0#1");
-    }
-
-    fn write_u32(data: &mut [u8], position: usize, value: u32) {
-        data[position..position + 4].copy_from_slice(&value.to_le_bytes());
     }
 }

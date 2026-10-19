@@ -93,7 +93,9 @@ All offsets are little-endian 32-bit values:
 | Area header | `+4`, `+8` | Offset (from the header) and number of events |
 | | `+12`, `+16` | Offset (from the header) and number of resources |
 | Event (`0x58` bytes) | `+0` | Key: `(package ID << 16) \| sound ID` |
+| | `+4` | Type: `1` plays, `2` stops |
 | | `+8` | `0x40000000` \| the resource's index in the area |
+| | `+16` | Pitch, as a 16.16 fixed-point multiple of the sample rate |
 | Resource (`0x80` bytes) | `+0` | The resource's own key |
 | | `+4` | Type: `1` for a clip of audio |
 | | `+12` | Stream size in bytes, repeated at `+52` |
@@ -102,9 +104,22 @@ All offsets are little-endian 32-bit values:
 | | `+68` | Sample rate (36000) |
 | | `+80` | Bank file name, such as `1_3_2.LS0`, null-terminated, up to 32 bytes |
 
-Only events pointing at audio resources (type `1`) are used, as in vgmstream.
-The other types, `4`, `8` and `10`, aren't dialogue. Parsed in
-`parse_map_records` in [`map.rs`](../core/src/subtitles/map.rs).
+Dialogue's events point straight at audio resources (type `1`), so only those
+are used for subtitles. The other types are containers, which characters'
+barks are chosen through: `10` plays one of its resources at random, `8` one
+chosen by a switch, and `4` several in sequence, such as a radio click, a line
+and a walkie-talkie burst. Each lists its resources in the area's extra section,
+starting at its `+16`: random containers in 12-byte entries counted at `+28`,
+switches in 8-byte entries counted at `+28`, and sequences in 4-byte entries
+counted at `+44`. Each entry starts with a `0x40000000` reference.
+
+Events' pitch matters for barks: the Chinese and Georgian soldiers', the Elite
+Force's and the Ex-Spetsnaz's are stored at 16,000 Hz but played at two thirds
+of that, 10,678 Hz, so the app plays them at that rate too. Everything else is
+played at its stored rate.
+
+Parsed in [`sound_map_file.rs`](../core/src/sound_map_file.rs), and for
+subtitles in `parse_map_records` in [`map.rs`](../core/src/subtitles/map.rs).
 
 An event's key is usually its resource's key too, but not always; see
 [Events and resources](#events-and-resources).
