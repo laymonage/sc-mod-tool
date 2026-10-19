@@ -7,7 +7,7 @@
 //! file such as `Music_Common.SS0`, `STREAM.SS0` or a level's `.LS0` bank.
 //! The extra maps have their own `MAPS.SM0` and `MAPS.LM0`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -134,6 +134,9 @@ struct SoundLists {
     lists: BTreeMap<SoundKind, Vec<Segment>>,
     /// Where each sound with a key is in its list.
     listed: HashMap<(SoundKind, u32, String, u32), usize>,
+    /// The IDs of sounds without a name of their own, which are listed by
+    /// their stream file or kind of entry instead.
+    unnamed: HashSet<String>,
 }
 
 impl SoundLists {
@@ -164,8 +167,12 @@ impl SoundLists {
         if let Some(identity) = identity {
             self.listed.insert(identity, segments.len());
         }
+        let id = format!("{path}#{subsong}");
+        if !entry.has_name() {
+            self.unnamed.insert(id.clone());
+        }
         segments.push(Segment {
-            id: format!("{path}#{subsong}"),
+            id,
             source: SegmentSource::MapSound {
                 subsong,
                 key: entry.key,
@@ -184,7 +191,8 @@ impl SoundLists {
         });
     }
 
-    /// The lists, each sorted by name and numbered.
+    /// The lists, each sorted by name, with sounds without a name of their
+    /// own last, and numbered.
     fn into_sorted(self) -> BTreeMap<SoundKind, Vec<Segment>> {
         let mut lists = self.lists;
         for segments in lists.values_mut() {
@@ -193,7 +201,12 @@ impl SoundLists {
                     SegmentSource::MapSound { subsong, key, .. } => (key, subsong),
                     SegmentSource::Stream { .. } => (None, 0),
                 };
-                (segment.name.as_deref().map(str::to_lowercase), key, subsong)
+                (
+                    self.unnamed.contains(&segment.id),
+                    segment.name.as_deref().map(str::to_lowercase),
+                    key,
+                    subsong,
+                )
             });
             for (index, segment) in segments.iter_mut().enumerate() {
                 segment.segment = index;
@@ -315,6 +328,12 @@ impl<'a> MapEntry<'a> {
             _ if is_localized => SoundKind::Voices,
             _ => SoundKind::Effects,
         })
+    }
+
+    /// Whether the sound has a name of its own, which only sounds stored in
+    /// the map do.
+    fn has_name(&self) -> bool {
+        self.stream_file().is_none() && !matches!(self.entry_type, Some(SEQUENCE | LAYERS))
     }
 
     /// The sound's name without its extension, such as `TAWCHI02`, the stream
@@ -448,6 +467,31 @@ mod tests {
             ]
         );
         assert_eq!(lists[&SoundKind::Music].len(), 1);
+    }
+
+    #[test]
+    fn lists_sounds_without_a_name_last() {
+        let mut lists = SoundLists::default();
+        for (subsong, stream_name) in [
+            "0_0_2_Training/0000/01-00660002/Music_Common.LS0",
+            "0_0_2_Training/0001/01-00130086/ZZZ_1.ima",
+            "0_0_2_Training/0002/01-00130087/AAA_1.ima",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let info = SoundInfo {
+                stream_name: stream_name.to_owned(),
+                ..info(1)
+            };
+            lists.add("ENGLISH/MAPS.LM0", subsong as u32 + 1, true, info);
+        }
+
+        let names: Vec<_> = lists.into_sorted()[&SoundKind::Voices]
+            .iter()
+            .map(|segment| segment.name.clone().unwrap())
+            .collect();
+        assert_eq!(names, ["AAA_1", "ZZZ_1", "Music_Common.LS0"]);
     }
 
     #[test]

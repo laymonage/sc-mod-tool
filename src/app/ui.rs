@@ -672,6 +672,7 @@ impl SCModToolApp {
                                     }
                                 }
                                 detail_row(ui, "File", bank.path.clone());
+                                detail_row(ui, "ID", segment.id.clone());
                             });
 
                         // Map sounds list where they're played, and only the
