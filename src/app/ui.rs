@@ -337,6 +337,7 @@ impl SCModToolApp {
             .show(ui, |ui| {
                 ui.add_space(6.0);
                 ui.label(RichText::new("Sound banks").strong());
+                ui.add_space(4.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.bank_filter)
                         .hint_text(format!("{} Filter", ICON_SEARCH.codepoint))
