@@ -29,6 +29,11 @@ fn main() -> eframe::Result<()> {
             let mut icons = egui_material_icons::font_insert();
             icons.data.tweak.scale = 1.3;
             cc.egui_ctx.add_font(icons);
+            // Show a pointing hand over buttons. Other clickable widgets set it
+            // themselves.
+            cc.egui_ctx.all_styles_mut(|style| {
+                style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+            });
             // Otherwise reopen the folder from last time, if it is still there.
             let startup_root = startup_root.or_else(|| {
                 let root = PathBuf::from(cc.storage?.get_string(app::ROOT_KEY)?);

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use eframe::egui::{self, Align, Align2, Key, Layout, Modifiers, RichText, Sense};
+use eframe::egui::{self, Align, Align2, CursorIcon, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
     ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_STOP,
@@ -158,7 +158,9 @@ impl SCModToolApp {
                                         ));
                                     }
                                 }
-                            });
+                            })
+                            .response
+                            .on_hover_cursor(CursorIcon::PointingHand);
                         ui.label("Language");
                         ui.separator();
                     }
@@ -291,7 +293,9 @@ impl SCModToolApp {
             .monospace(),
         );
         ui.spacing_mut().slider_width = 160.0;
-        let response = ui.add(egui::Slider::new(&mut position, 0.0..=total).show_value(false));
+        let response = ui
+            .add(egui::Slider::new(&mut position, 0.0..=total).show_value(false))
+            .on_hover_and_drag_cursor(CursorIcon::PointingHand);
         if response.dragged() {
             actions.push(Action::DragSeek(Some(position)));
         } else if response.drag_stopped() || response.changed() {
@@ -456,7 +460,9 @@ impl SCModToolApp {
                         for filter in TextFilter::ALL {
                             ui.selectable_value(&mut self.text_filter, filter, filter.label());
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_cursor(CursorIcon::PointingHand);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
@@ -568,7 +574,7 @@ impl SCModToolApp {
                         }
                     }
 
-                    let response = row.response();
+                    let response = row.response().on_hover_cursor(CursorIcon::PointingHand);
                     if response.double_clicked() {
                         actions.push(Action::TogglePlayback(index));
                     } else if response.clicked() {
@@ -921,7 +927,9 @@ fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
                         });
                         ui.end_row();
                     });
-            });
+            })
+            .header_response
+            .on_hover_cursor(CursorIcon::PointingHand);
     });
     ui.add_space(4.0);
 }
