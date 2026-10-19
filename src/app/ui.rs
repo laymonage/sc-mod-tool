@@ -525,13 +525,16 @@ impl SCModToolApp {
                         } else {
                             (ICON_PLAY_ARROW, "Play")
                         };
-                        if ui
-                            .add(egui::Button::new(icon.codepoint).frame(false))
-                            .on_hover_text(hint)
-                            .clicked()
-                        {
-                            actions.push(Action::TogglePlayback(index));
-                        }
+                        // Fill the cell, to centre the icon in it.
+                        ui.centered_and_justified(|ui| {
+                            if ui
+                                .add(egui::Button::new(icon.codepoint).frame(false))
+                                .on_hover_text(hint)
+                                .clicked()
+                            {
+                                actions.push(Action::TogglePlayback(index));
+                            }
+                        });
                     });
                     row.col(|ui| {
                         ui.label(format!("{}", segment.segment + 1));
