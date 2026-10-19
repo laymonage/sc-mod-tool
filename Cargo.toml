@@ -12,8 +12,9 @@ default = ["uelib-bridge"]
 uelib-bridge = ["sc-mod-tool-core/uelib-bridge"]
 
 [dependencies]
-eframe = { version = "0.36.2", features = ["persistence", "wgpu"] }
-egui_extras = { version = "0.36.2", default-features = false }
+eframe = { version = "0.37.0", features = ["persistence", "wgpu"] }
+egui_extras = { version = "0.37.0", default-features = false }
+egui_material_icons = "0.9.0"
 rfd = "0.17.2"
 rodio = "0.20.1"
 sc-mod-tool-core = { path = "core", default-features = false }

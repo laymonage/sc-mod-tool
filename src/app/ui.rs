@@ -2,6 +2,10 @@ use std::time::Duration;
 
 use eframe::egui::{self, Align, Align2, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
+use egui_material_icons::icons::{
+    ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_STOP,
+    ICON_WARNING,
+};
 use sc_mod_tool_core::{
     Bank, Segment, SegmentSource,
     subtitles::{MappingConfidence, Subtitle},
@@ -115,7 +119,10 @@ impl SCModToolApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("SC Mod Tool").strong().size(16.0));
                 ui.separator();
-                if ui.button("🗁 Open game folder…").clicked() {
+                if ui
+                    .button(format!("{} Open game folder…", ICON_FOLDER_OPEN.codepoint))
+                    .clicked()
+                {
                     actions.push(Action::ChooseRoot);
                 }
 
@@ -123,7 +130,10 @@ impl SCModToolApp {
                     if !self.languages.is_empty() {
                         let scanning = self.scan_progress.is_some();
                         if ui
-                            .add_enabled(!scanning, egui::Button::new("🔄 Rescan"))
+                            .add_enabled(
+                                !scanning,
+                                egui::Button::new(format!("{} Rescan", ICON_REFRESH.codepoint)),
+                            )
                             .on_hover_text("Read the game files again, including its scripts.")
                             .clicked()
                         {
@@ -175,7 +185,8 @@ impl SCModToolApp {
                         && ui
                             .small_button(
                                 RichText::new(format!(
-                                    "⚠ {} warnings",
+                                    "{} {} warnings",
+                                    ICON_WARNING.codepoint,
                                     self.subtitle_warnings.len()
                                 ))
                                 .color(ui.visuals().warn_fg_color),
@@ -185,25 +196,28 @@ impl SCModToolApp {
                         actions.push(Action::ToggleWarnings);
                     }
                     if let Some(id) = self.playing_segment_id() {
-                        if ui.small_button("⏹ Stop").clicked() {
+                        if ui
+                            .small_button(format!("{} Stop", ICON_STOP.codepoint))
+                            .clicked()
+                        {
                             actions.push(Action::StopPlayback);
                         }
                         let label = self.find_segment(id).map_or_else(
                             || id.to_owned(),
                             |(bank, segment)| segment_label(bank, segment),
                         );
-                        let state = match &self.active_playback {
+                        let (icon, state) = match &self.active_playback {
                             Some(playback) => {
                                 self.show_playback_controls(ui, playback, actions);
                                 if playback.sink.is_paused() {
-                                    "⏸ Paused"
+                                    (ICON_PAUSE, "Paused")
                                 } else {
-                                    "▶ Playing"
+                                    (ICON_PLAY_ARROW, "Playing")
                                 }
                             }
-                            None => "▶ Loading",
+                            None => (ICON_PLAY_ARROW, "Loading"),
                         };
-                        ui.label(format!("{state} {label}"));
+                        ui.label(format!("{} {state} {label}", icon.codepoint));
                         ui.separator();
                     }
                     // The status takes whatever space the controls leave.
@@ -243,8 +257,11 @@ impl SCModToolApp {
                         } else if self.status.is_error {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(format!("⚠ {}", self.status.message))
-                                        .color(ui.visuals().error_fg_color),
+                                    RichText::new(format!(
+                                        "{} {}",
+                                        ICON_WARNING.codepoint, self.status.message
+                                    ))
+                                    .color(ui.visuals().error_fg_color),
                                 )
                                 .truncate(),
                             );
@@ -286,9 +303,9 @@ impl SCModToolApp {
             actions.push(Action::Seek(Duration::from_secs_f32(position)));
         }
         let pause_icon = if playback.sink.is_paused() {
-            "▶"
+            ICON_PLAY_ARROW
         } else {
-            "⏸"
+            ICON_PAUSE
         };
         if ui.small_button(pause_icon).clicked() {
             actions.push(Action::TogglePause);
@@ -325,7 +342,7 @@ impl SCModToolApp {
                 ui.label(RichText::new("Sound banks").strong());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.bank_filter)
-                        .hint_text("🔍 Filter")
+                        .hint_text(format!("{} Filter", ICON_SEARCH.codepoint))
                         .desired_width(f32::INFINITY),
                 );
                 ui.add_space(4.0);
@@ -399,9 +416,12 @@ impl SCModToolApp {
             ui.add_space(8.0);
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.label(
-                    RichText::new("⚠ This bank can't be played")
-                        .strong()
-                        .color(ui.visuals().warn_fg_color),
+                    RichText::new(format!(
+                        "{} This bank can't be played",
+                        ICON_WARNING.codepoint
+                    ))
+                    .strong()
+                    .color(ui.visuals().warn_fg_color),
                 );
                 ui.label(issue);
             });
@@ -424,10 +444,11 @@ impl SCModToolApp {
         let has_subtitles = self.has_subtitles(bank);
         ui.horizontal(|ui| {
             let hint = match (is_map_bank, has_subtitles) {
-                (false, _) => "🔍 Search subtitles and cues",
-                (true, false) => "🔍 Search names, keys and levels",
-                (true, true) => "🔍 Search names, keys, levels and subtitles",
+                (false, _) => "Search subtitles and cues",
+                (true, false) => "Search names, keys and levels",
+                (true, true) => "Search names, keys, levels and subtitles",
             };
+            let hint = format!("{} {hint}", ICON_SEARCH.codepoint);
             ui.add(
                 egui::TextEdit::singleline(&mut self.segment_filter)
                     .hint_text(hint)
@@ -501,9 +522,9 @@ impl SCModToolApp {
 
                     row.col(|ui| {
                         let (icon, hint) = if is_playing {
-                            ("⏹", "Stop")
+                            (ICON_STOP, "Stop")
                         } else {
-                            ("▶", "Play")
+                            (ICON_PLAY_ARROW, "Play")
                         };
                         if ui
                             .add(egui::Button::new(icon).frame(false))
@@ -592,7 +613,12 @@ impl SCModToolApp {
 
                         // Segment actions. Export and replace will go here.
                         let is_playing = self.playing_segment_id() == Some(segment.id.as_str());
-                        let label = if is_playing { "⏹  Stop" } else { "▶  Play" };
+                        let (icon, label) = if is_playing {
+                            (ICON_STOP, "Stop")
+                        } else {
+                            (ICON_PLAY_ARROW, "Play")
+                        };
+                        let label = format!("{}  {label}", icon.codepoint);
                         if ui
                             .add(egui::Button::new(label).min_size(egui::vec2(96.0, 28.0)))
                             .on_hover_text("Space")
@@ -782,7 +808,8 @@ fn show_welcome(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
             ui.add_space(16.0);
             if ui
                 .add(egui::Button::new(
-                    RichText::new("🗁  Open game folder…").size(16.0),
+                    RichText::new(format!("{}  Open game folder…", ICON_FOLDER_OPEN.codepoint))
+                        .size(16.0),
                 ))
                 .clicked()
             {
@@ -806,7 +833,7 @@ fn bank_row(ui: &mut egui::Ui, bank: &Bank, selected: bool) -> egui::Response {
     };
     let response = ui.selectable_label(selected, name);
     let (count, hint) = if bank.segments.is_empty() {
-        ("⚠".to_owned(), bank.issue.as_deref())
+        (ICON_WARNING.codepoint.to_owned(), bank.issue.as_deref())
     } else {
         (bank.segments.len().to_string(), None)
     };

@@ -25,6 +25,7 @@ fn main() -> eframe::Result<()> {
             ..Default::default()
         },
         Box::new(|cc| {
+            egui_material_icons::initialize(&cc.egui_ctx);
             // Otherwise reopen the folder from last time, if it is still there.
             let startup_root = startup_root.or_else(|| {
                 let root = PathBuf::from(cc.storage?.get_string(app::ROOT_KEY)?);
