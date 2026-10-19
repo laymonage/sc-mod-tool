@@ -1,0 +1,159 @@
+# Sound maps
+
+`MAPS.SM0` and `MAPS.LM0` list every sound the game plays: what plays it, and
+where its audio is.
+
+- **`Sounds/MAPS.SM0`** is shared by every language: sound effects, music and
+  long streams.
+- **`Sounds/<language>/MAPS.LM0`** is the language's own: characters' barks,
+  voice lines and the alerts in `Music_*.LS0`.
+
+Each [extra map](README.md#extra-maps) has its own of both, which only describe
+its own files.
+
+## Structure
+
+A map is split into areas, one per level plus `fix` and `menu`. Each area has
+a list of **events**, which the game plays, and a list of **resources**, which
+describe the audio. The keys the sound packages store are event keys. An event
+plays a resource by its index in the area's list, so the game never looks a
+resource up by key.
+
+All values are little-endian 32-bit unless noted:
+
+| Where | Offset | Field |
+|---|---|---|
+| File | `+0` | Version, `7` |
+| | `+4`, `+8` | Offset and number of areas |
+| Area entry (`0x30` bytes) | `+8` | Offset of the area's header |
+| | `+16` | Area name, such as `1_1_0Tbilisi` |
+| Area header | `+4`, `+8` | Offset (from the header) and number of events |
+| | `+12`, `+16` | Offset (from the header) and number of resources |
+| | `+28`, `+32` | Offset (from the header) and size of the extra section |
+| Event (`0x58` bytes) | `+0` | Key: `(package ID << 16) \| sound ID` |
+| | `+4` | Type: `1` plays, `2` stops |
+| | `+8` | `0x40000000` \| the resource's index in the area |
+| | `+16` | [Pitch](#pitch), as a 16.16 fixed-point multiple of the sample rate |
+| Resource (`0x80` bytes) | `+0` | The resource's own key |
+| | `+4` | [Type](#resource-types) |
+
+An audio resource (type `1`) continues:
+
+| Offset | Field |
+|---|---|
+| `+12` | Stream size in bytes, repeated at `+52` |
+| `+20` | Offset of the stream in its file |
+| `+48` | Sample count |
+| `+68` | Sample rate |
+| `+72`, `+74` | Bits per decoded sample (16) and channels, 16-bit each |
+| `+76` | Codec: `1` 16-bit PCM, `2` Ubisoft ADPCM, `4` Ubisoft IMA ADPCM |
+| `+80` | File name, null-terminated, up to 32 bytes |
+
+The file name is the [stream file](sound-banks.md) holding the audio, such as
+`1_3_2.LS0` or `Music_Common.SS0`, or, for audio stored in the map itself, the
+original recording's name, such as `DOOJAM_1.wav` or `CSOGAZ_1.ima`.
+
+Non-audio resources keep leftover bytes from the previous resource in fields
+they don't use, as vgmstream's notes warn, so a container can seem to have a
+file name.
+
+The app reads events and resources in
+[`sound_map_file.rs`](../core/src/sound_map_file.rs), for subtitles. vgmstream
+reads the rest.
+
+## Resource types
+
+| Type | What it is |
+|---|---|
+| `1` | A clip of audio |
+| `4` | A sequence: several resources in a row |
+| `8` | A switch: one resource, chosen by a value |
+| `10` | Random: one resource, chosen at random |
+| `15` | Silence |
+
+Containers (`4`, `8` and `10`) list their resources in the area's extra
+section, from the offset at their `+16`. Each entry starts with a
+`0x40000000`-style reference:
+
+| Type | Entries | Counted at | Entry size |
+|---|---|---|---|
+| Sequence (`4`) | References | `+44` | 4 bytes |
+| Switch (`8`) | Reference, then the value that chooses it | `+28` | 8 bytes |
+| Random (`10`) | Reference, then the chance out of `0x10000` | `+28` | 12 bytes |
+
+Dialogue's events point straight at audio. Characters' barks go through
+containers: some barks' events play a random container, and others a switch,
+which picks a random container, which picks a clip.
+
+## Pitch
+
+An event plays its audio at its pitch times the audio's stored sample rate.
+Almost every event's pitch is 1.0 (`0x10000`), but the Chinese and Georgian
+soldiers', the Elite Force's and the Ex-Spetsnaz's barks (`CSO*`, `GSO*`,
+`EFO*`, `EXS*`) are stored at 16,000 Hz and played at two thirds of that
+(`0xAADA`), 10,678 Hz. Played at their stored rate, they sound too fast and
+too high. Following each `MAPS.LM0` event through its containers gives every
+clip a single pitch.
+
+vgmstream applies it: for Splinter Cell (PC) maps, it finds the first play
+event that reaches a clip, directly or through containers, and scales the
+clip's sample rate by its pitch (`apply_event_pitch` in
+[`ubi_sb.c`](../vendor/vgmstream/src/meta/ubi_sb.c)). This is a change to the
+vendored vgmstream that isn't upstream yet.
+
+## Event keys aren't always resource keys
+
+An event's key is usually its resource's key too, but not always: in 21 of the
+English map's packages, some events play a resource with another key. The game
+always goes through the event, so this never shows in game, but matching a
+sound's key straight to a resource key puts lines on the wrong clips. Some
+examples:
+
+- `S0_0_2Voice`'s events `0x00`–`0x29` play their resources in reverse order,
+  so the training lines "All right, Fisher, we'll get through this…" and "We'll
+  let you do your thing here…" would land on the intro cutscene's "I like to
+  be early. Hello Colonel." and "Sam Fisher. I can't believe you beat me here."
+- `S1_1_1Voice`'s `Play_11_10_01` was added late: its event, `0x41`, plays
+  resource `0x10`.
+- `S2_2_1Voice`'s Mafioso lines play each other's resources in pairs, so
+  "Of course." would be shown on a 4.7-second clip, and "Thank god. Make sure
+  you leave…" on a 1.7-second one.
+- `S2_1_2Voice`'s events `0x68`–`0x6D` play their resources in a small
+  rotation, such as `0x6C` playing `0x68`.
+- The Vselka maps number `S3_1_1Voice`'s resources differently from the
+  language folder's map: `1_7_1_1VselkaInfiltration` has 54 of its 60
+  resources for the package numbered past the package's last sound,
+  `0x450070`, while its events use the package's keys.
+
+**Use the file name in the resource.** A level can play a sound from another
+level's package: level 1_3_2 plays `S1_3_3Voice.Play_13_21_01`, whose audio is
+in `1_3_2.LS0`. Guessing the bank from the package name gets that wrong.
+
+## `MAPS.SM0`'s events
+
+`MAPS.SM0`'s resources have the same layout, but most of its events don't use
+`0x40000000` references, so they point at their sounds some other way that
+hasn't been worked out. Its sounds are listed through vgmstream all the same,
+but whether the game pitches any of them isn't known; they're played at their
+stored rates.
+
+## How the app lists them
+
+vgmstream lists a map's audio resources, sequences and layers as numbered
+entries, named like `1_1_0Tbilisi/0012/01-00130086/TAWCHI02.wav`: the area, the
+entry, its type and resource key, and its file name. A map sound's ID is the
+map's path and entry number, such as `ENGLISH/MAPS.LM0#1`.
+
+The app sorts each map's sounds into four banks: **Sound effects** (audio stored
+in `MAPS.SM0`), **Voices** (audio stored in `MAPS.LM0`, and its `Music_*.LS0`
+alerts), **Music** (`Music_*.SS0` and the sequences that play it) and
+**Streams** (`STREAM.SS0` and other multi-channel or layered sounds). Entries
+whose audio is in a numeric `.LS0` bank are left out, since those banks are
+[scanned](sound-banks.md#numeric-banks) and listed on their own.
+
+Each area lists every sound it plays, so most sounds are listed by several
+areas. Entries with the same key, name and length are listed once, with every
+area that plays them ("Used in"), under the first entry's number. Sounds are
+sorted by name. Those whose audio isn't in the map, which only have their
+stream file's name, and sequences go last. Listed in
+[`sound_maps.rs`](../core/src/banks/sound_maps.rs).

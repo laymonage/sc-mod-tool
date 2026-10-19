@@ -11,7 +11,8 @@ Subtitles come from the game's compiled UnrealScript and localization files,
 matched to segments through `.uax` sound keys and `MAPS.LM0`. This includes
 lines the game plays without showing a subtitle. See
 [docs/subtitle-mapping.md](docs/subtitle-mapping.md) for how the matching works
-and the quirks in the game data it works around.
+and the quirks in the game data it works around, and [docs](docs/README.md) for
+the game's sound files.
 
 The `core` crate has no UI code, so it can back CLIs too.
 
