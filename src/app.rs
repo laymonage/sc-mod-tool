@@ -83,6 +83,39 @@ impl TextFilter {
     }
 }
 
+/// A column the segment table can be sorted by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortColumn {
+    /// The bank's own order.
+    Number,
+    Duration,
+    Size,
+    Offset,
+    UsedIn,
+    /// The map entry that plays a map sound.
+    Entry,
+    Key,
+    Name,
+    Subtitle,
+}
+
+/// How the segment table is sorted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SegmentSort {
+    column: SortColumn,
+    descending: bool,
+}
+
+impl SegmentSort {
+    /// Sorts by `column`, or reverses the order if it's already sorted by it.
+    fn by(self, column: SortColumn) -> Self {
+        Self {
+            column,
+            descending: self.column == column && !self.descending,
+        }
+    }
+}
+
 struct Status {
     message: String,
     is_error: bool,
@@ -123,6 +156,9 @@ pub struct SCModToolApp {
     bank_filter: String,
     segment_filter: String,
     text_filter: TextFilter,
+    /// Kept when switching banks. Banks without the column are shown in their
+    /// own order.
+    segment_sort: SegmentSort,
     show_warnings: bool,
     /// Scroll the segment table to the selection on the next frame.
     scroll_to_selection: bool,
@@ -161,6 +197,10 @@ impl SCModToolApp {
             bank_filter: String::new(),
             segment_filter: String::new(),
             text_filter: TextFilter::All,
+            segment_sort: SegmentSort {
+                column: SortColumn::Number,
+                descending: false,
+            },
             show_warnings: false,
             scroll_to_selection: false,
         }

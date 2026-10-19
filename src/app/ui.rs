@@ -3,8 +3,8 @@ use std::time::Duration;
 use eframe::egui::{self, Align, Align2, CursorIcon, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
-    ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_STOP,
-    ICON_WARNING,
+    ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW,
+    ICON_REFRESH, ICON_SEARCH, ICON_STOP, ICON_WARNING,
 };
 use sc_mod_tool_core::{
     Bank, Segment, SegmentSource,
@@ -16,7 +16,7 @@ const NO_TEXT: &str = "No text";
 const NO_TEXT_HINT: &str =
     "This line exists in its scene, but the game's localization files have no text for it.";
 
-use super::{SCModToolApp, ScanProgress, TextFilter};
+use super::{SCModToolApp, ScanProgress, SortColumn, TextFilter};
 use crate::audio::ActivePlayback;
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
@@ -34,6 +34,7 @@ enum Action {
     DragSeek(Option<f32>),
     Seek(Duration),
     ToggleWarnings,
+    SortBy(SortColumn),
 }
 
 impl SCModToolApp {
@@ -85,6 +86,10 @@ impl SCModToolApp {
             Action::DragSeek(position) => self.seek_drag = position,
             Action::Seek(position) => self.seek(position),
             Action::ToggleWarnings => self.show_warnings = !self.show_warnings,
+            Action::SortBy(column) => {
+                self.segment_sort = self.segment_sort.by(column);
+                self.scroll_to_selection = true;
+            }
         }
     }
 
@@ -475,24 +480,17 @@ impl SCModToolApp {
         let scroll_to_selection = std::mem::take(&mut self.scroll_to_selection);
         let playing = self.playing_segment_id();
         let row_height = ui.spacing().interact_size.y + 4.0;
+        let columns = table_columns(is_map_bank, has_subtitles);
         let mut table = TableBuilder::new(ui)
             .id_salt("segments")
             .striped(true)
             .resizable(true)
             .sense(Sense::click())
             .auto_shrink([false, false])
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::exact(28.0))
-            .column(Column::auto().at_least(36.0))
-            .column(Column::auto().at_least(64.0))
-            .column(Column::auto().at_least(64.0))
-            .column(Column::auto().at_least(80.0));
-        // Map sounds' names come before their subtitles, when they have any.
-        let map_subtitles = is_map_bank && has_subtitles;
-        if map_subtitles {
-            table = table.column(Column::auto().at_least(120.0).clip(true));
+            .cell_layout(Layout::left_to_right(Align::Center));
+        for column in &columns {
+            table = table.column(column.width);
         }
-        table = table.column(Column::remainder().clip(true));
         if scroll_to_selection
             && let Some(row) = self
                 .selected_segment
@@ -501,16 +499,34 @@ impl SCModToolApp {
             table = table.scroll_to_row(row, None);
         }
 
-        let titles: &[&str] = match (is_map_bank, map_subtitles) {
-            (false, _) => &["", "#", "Duration", "Size", "Offset", "Subtitle"],
-            (true, false) => &["", "#", "Duration", "Used in", "Key", "Name"],
-            (true, true) => &["", "#", "Duration", "Used in", "Key", "Name", "Subtitle"],
-        };
+        let sort = self.segment_sort;
+        let map_subtitles = is_map_bank && has_subtitles;
         table
             .header(22.0, |mut header| {
-                for &title in titles {
+                for column in &columns {
                     header.col(|ui| {
-                        ui.strong(title);
+                        let Some(sort_column) = column.sort else {
+                            ui.strong(column.title);
+                            return;
+                        };
+                        let title = if sort.column == sort_column {
+                            let arrow = if sort.descending {
+                                ICON_ARROW_DOWNWARD
+                            } else {
+                                ICON_ARROW_UPWARD
+                            };
+                            format!("{} {}", column.title, arrow.codepoint)
+                        } else {
+                            column.title.to_owned()
+                        };
+                        if ui
+                            .add(egui::Button::new(RichText::new(title).strong()).frame(false))
+                            .on_hover_text("Sort by this column; click again to reverse")
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            actions.push(Action::SortBy(sort_column));
+                        }
                     });
                 }
             })
@@ -545,10 +561,18 @@ impl SCModToolApp {
                         ui.label(format_duration(segment));
                     });
                     match segment.source {
-                        SegmentSource::MapSound { key, ref areas, .. } => {
+                        SegmentSource::MapSound {
+                            subsong,
+                            key,
+                            ref areas,
+                        } => {
                             row.col(|ui| {
                                 ui.label(areas.len().to_string())
                                     .on_hover_text("How many of the map's areas play it");
+                            });
+                            row.col(|ui| {
+                                ui.label(subsong.to_string())
+                                    .on_hover_text("The map entry that plays it");
                             });
                             row.col(|ui| {
                                 ui.label(RichText::new(format_key(key)).monospace());
@@ -739,7 +763,8 @@ impl SCModToolApp {
         let query = self.segment_filter.trim().to_lowercase();
         // The text filter is only offered for banks with subtitles.
         let filters_text = self.has_subtitles(bank);
-        bank.segments
+        let visible = bank
+            .segments
             .iter()
             .enumerate()
             .filter(|(_, segment)| {
@@ -778,7 +803,74 @@ impl SCModToolApp {
                 shown && (query.is_empty() || subtitle_matches || sound_matches)
             })
             .map(|(index, _)| index)
-            .collect()
+            .collect::<Vec<_>>();
+        // Banks without the sorted column keep their own order.
+        let sort = self.segment_sort;
+        if !table_columns(bank.sound_kind.is_some(), filters_text)
+            .iter()
+            .any(|column| column.sort == Some(sort.column))
+        {
+            return visible;
+        }
+        let mut keyed = visible
+            .into_iter()
+            .map(|index| (self.sort_key(&bank.segments[index], sort.column), index))
+            .collect::<Vec<_>>();
+        // Missing values go last either way, and segments with equal values
+        // stay in the bank's order.
+        keyed.sort_by(
+            |((left_missing, left), left_index), ((right_missing, right), right_index)| {
+                let values = if sort.descending {
+                    right.cmp(left)
+                } else {
+                    left.cmp(right)
+                };
+                left_missing
+                    .cmp(right_missing)
+                    .then(values)
+                    .then(left_index.cmp(right_index))
+            },
+        );
+        keyed.into_iter().map(|(_, index)| index).collect()
+    }
+
+    /// A segment's value in `column`, after a flag that's set when it has
+    /// none, such as a stream's key.
+    fn sort_key(&self, segment: &Segment, column: SortColumn) -> (bool, SortValue) {
+        let number = |value: Option<u64>| (value.is_none(), SortValue::Number(value.unwrap_or(0)));
+        let text = |value: Option<String>| {
+            (
+                value.is_none(),
+                SortValue::Text(value.unwrap_or_default().to_lowercase()),
+            )
+        };
+        let (subsong, key, areas) = match &segment.source {
+            SegmentSource::MapSound {
+                subsong,
+                key,
+                areas,
+            } => (Some(*subsong), *key, Some(areas.len())),
+            SegmentSource::Stream { .. } => (None, None, None),
+        };
+        match column {
+            SortColumn::Number => number(Some(segment.segment as u64)),
+            SortColumn::Duration => number(Some(
+                u64::from(segment.sample_count) * 1_000_000 / u64::from(segment.sample_rate.max(1)),
+            )),
+            SortColumn::Size => number(segment.stream_range().map(|(_, length)| length)),
+            SortColumn::Offset => number(segment.stream_range().map(|(offset, _)| offset)),
+            SortColumn::UsedIn => number(areas.map(|count| count as u64)),
+            SortColumn::Entry => number(subsong.map(u64::from)),
+            SortColumn::Key => number(key.map(u64::from)),
+            SortColumn::Name => text(segment.name.clone()),
+            // As shown: the first subtitle's text, or its cue when it has none.
+            SortColumn::Subtitle => text(self.subtitles.get(&segment.id).map(|subtitles| {
+                subtitles[0]
+                    .text
+                    .clone()
+                    .unwrap_or_else(|| subtitles[0].cue.clone())
+            })),
+        }
     }
 
     /// Whether any of the bank's segments has a subtitle. `.LS0` banks are
@@ -855,6 +947,87 @@ fn bank_row(ui: &mut egui::Ui, bank: &Bank, selected: bool) -> egui::Response {
         Some(hint) => response.on_hover_text(hint),
         None => response,
     }
+}
+
+/// A column of the segment table.
+struct TableColumn {
+    title: &'static str,
+    sort: Option<SortColumn>,
+    width: Column,
+}
+
+/// The segment table's columns for an `.LS0` bank or a sound map's bank.
+/// Map sounds' names come before their subtitles, when they have any.
+fn table_columns(is_map_bank: bool, has_subtitles: bool) -> Vec<TableColumn> {
+    let column = |title, sort, width| TableColumn { title, sort, width };
+    let mut columns = vec![
+        column("", None, Column::exact(28.0)),
+        column("#", Some(SortColumn::Number), Column::auto().at_least(36.0)),
+        column(
+            "Duration",
+            Some(SortColumn::Duration),
+            Column::auto().at_least(64.0),
+        ),
+    ];
+    if is_map_bank {
+        columns.extend([
+            column(
+                "Used in",
+                Some(SortColumn::UsedIn),
+                Column::auto().at_least(64.0),
+            ),
+            column(
+                "Entry",
+                Some(SortColumn::Entry),
+                Column::auto().at_least(56.0),
+            ),
+            column("Key", Some(SortColumn::Key), Column::auto().at_least(80.0)),
+        ]);
+        if has_subtitles {
+            columns.push(column(
+                "Name",
+                Some(SortColumn::Name),
+                Column::auto().at_least(120.0).clip(true),
+            ));
+            columns.push(column(
+                "Subtitle",
+                Some(SortColumn::Subtitle),
+                Column::remainder().clip(true),
+            ));
+        } else {
+            columns.push(column(
+                "Name",
+                Some(SortColumn::Name),
+                Column::remainder().clip(true),
+            ));
+        }
+    } else {
+        columns.extend([
+            column(
+                "Size",
+                Some(SortColumn::Size),
+                Column::auto().at_least(64.0),
+            ),
+            column(
+                "Offset",
+                Some(SortColumn::Offset),
+                Column::auto().at_least(80.0),
+            ),
+            column(
+                "Subtitle",
+                Some(SortColumn::Subtitle),
+                Column::remainder().clip(true),
+            ),
+        ]);
+    }
+    columns
+}
+
+/// A value segments are sorted by.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SortValue {
+    Number(u64),
+    Text(String),
 }
 
 /// A segment's first subtitle, for the segment table.
