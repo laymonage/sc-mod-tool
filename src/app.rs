@@ -114,6 +114,9 @@ pub struct SCModToolApp {
     scan_progress: Option<ScanProgress>,
     pending_playback: Option<PendingPlayback>,
     active_playback: Option<ActivePlayback>,
+    /// Where the seeker is being dragged to, so it follows the pointer instead
+    /// of the playback position until it is released.
+    seek_drag: Option<f32>,
     audio: AudioOutput,
     status: Status,
 
@@ -149,6 +152,7 @@ impl SCModToolApp {
             scan_progress: None,
             pending_playback: None,
             active_playback: None,
+            seek_drag: None,
             audio: AudioOutput::default(),
             status: Status {
                 message: String::new(),
@@ -407,6 +411,22 @@ impl SCModToolApp {
         if let Some(playback) = self.active_playback.take() {
             playback.sink.stop();
         }
+        self.seek_drag = None;
+    }
+
+    fn seek(&mut self, position: Duration) {
+        self.seek_drag = None;
+        if let Some(playback) = &self.active_playback
+            && let Err(error) = playback.seek(position)
+        {
+            self.set_status(format!("Could not seek: {error}"), true);
+        }
+    }
+
+    fn toggle_pause(&mut self) {
+        if let Some(playback) = &self.active_playback {
+            playback.toggle_pause();
+        }
     }
 
     fn handle_messages(&mut self, ctx: &egui::Context) {
@@ -545,6 +565,7 @@ impl eframe::App for SCModToolApp {
             .is_some_and(|playback| playback.sink.empty())
         {
             self.active_playback = None;
+            self.seek_drag = None;
         }
 
         // Keep repainting while work is in progress, so finished playback is

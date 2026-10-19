@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{OutputStream, OutputStreamHandle, Sink, buffer::SamplesBuffer, cpal};
 use sc_mod_tool_core::decoder::DecodedAudio;
@@ -6,6 +8,28 @@ use sc_mod_tool_core::decoder::DecodedAudio;
 pub struct ActivePlayback {
     pub sink: Sink,
     pub segment_id: String,
+    pub duration: Duration,
+}
+
+impl ActivePlayback {
+    /// How far playback has got, never past the end.
+    pub fn position(&self) -> Duration {
+        self.sink.get_pos().min(self.duration)
+    }
+
+    pub fn seek(&self, position: Duration) -> Result<(), String> {
+        self.sink
+            .try_seek(position.min(self.duration))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn toggle_pause(&self) {
+        if self.sink.is_paused() {
+            self.sink.play();
+        } else {
+            self.sink.pause();
+        }
+    }
 }
 
 /// The audio output stream, kept open between playbacks because opening a
@@ -47,11 +71,17 @@ impl AudioOutput {
             }
         };
         let sink = Sink::try_new(&stream.handle).map_err(|error| error.to_string())?;
+        let frames = audio.samples.len() / usize::from(audio.channels.max(1));
+        let duration = Duration::from_secs_f64(frames as f64 / f64::from(audio.sample_rate.max(1)));
         sink.append(SamplesBuffer::new(
             audio.channels,
             audio.sample_rate,
             audio.samples,
         ));
-        Ok(ActivePlayback { sink, segment_id })
+        Ok(ActivePlayback {
+            sink,
+            segment_id,
+            duration,
+        })
     }
 }

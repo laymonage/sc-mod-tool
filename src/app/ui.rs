@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use eframe::egui::{self, Align, Align2, Key, Layout, Modifiers, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use sc_mod_tool_core::{
@@ -11,6 +13,7 @@ const NO_TEXT_HINT: &str =
     "This line exists in its scene, but the game's localization files have no text for it.";
 
 use super::{SCModToolApp, ScanProgress, TextFilter};
+use crate::audio::ActivePlayback;
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
 enum Action {
@@ -22,6 +25,10 @@ enum Action {
     SelectSegment(usize),
     TogglePlayback(usize),
     StopPlayback,
+    TogglePause,
+    /// Move the seeker without seeking yet, or stop moving it.
+    DragSeek(Option<f32>),
+    Seek(Duration),
     ToggleWarnings,
 }
 
@@ -62,6 +69,9 @@ impl SCModToolApp {
                 self.toggle_playback(ctx, index);
             }
             Action::StopPlayback => self.stop_playback(),
+            Action::TogglePause => self.toggle_pause(),
+            Action::DragSeek(position) => self.seek_drag = position,
+            Action::Seek(position) => self.seek(position),
             Action::ToggleWarnings => self.show_warnings = !self.show_warnings,
         }
     }
@@ -221,18 +231,61 @@ impl SCModToolApp {
                             || id.to_owned(),
                             |(bank, segment)| segment_label(bank, segment),
                         );
-                        let state = if self.active_playback.is_some() {
-                            "Playing"
-                        } else {
-                            "Loading"
+                        let state = match &self.active_playback {
+                            Some(playback) => {
+                                self.show_playback_controls(ui, playback, actions);
+                                if playback.sink.is_paused() {
+                                    "⏸ Paused"
+                                } else {
+                                    "▶ Playing"
+                                }
+                            }
+                            None => "▶ Loading",
                         };
-                        ui.label(format!("▶ {state} {label}"));
+                        ui.label(format!("{state} {label}"));
                         ui.separator();
                     }
                 });
             });
             ui.add_space(2.0);
         });
+    }
+
+    /// The seeker, its time readout and the pause button, laid out right to
+    /// left.
+    fn show_playback_controls(
+        &self,
+        ui: &mut egui::Ui,
+        playback: &ActivePlayback,
+        actions: &mut Vec<Action>,
+    ) {
+        let total = playback.duration.as_secs_f32();
+        let mut position = self
+            .seek_drag
+            .unwrap_or_else(|| playback.position().as_secs_f32());
+        ui.label(
+            RichText::new(format!(
+                "{} / {}",
+                format_time(position),
+                format_time(total)
+            ))
+            .monospace(),
+        );
+        ui.spacing_mut().slider_width = 160.0;
+        let response = ui.add(egui::Slider::new(&mut position, 0.0..=total).show_value(false));
+        if response.dragged() {
+            actions.push(Action::DragSeek(Some(position)));
+        } else if response.drag_stopped() || response.changed() {
+            actions.push(Action::Seek(Duration::from_secs_f32(position)));
+        }
+        let pause_icon = if playback.sink.is_paused() {
+            "▶"
+        } else {
+            "⏸"
+        };
+        if ui.small_button(pause_icon).clicked() {
+            actions.push(Action::TogglePause);
+        }
     }
 
     fn show_loading(&self, ui: &mut egui::Ui) {
@@ -848,6 +901,12 @@ fn detail_row(ui: &mut egui::Ui, name: &str, value: String) {
     ui.label(RichText::new(name).weak());
     ui.label(value);
     ui.end_row();
+}
+
+/// Formats seconds as `m:ss`.
+fn format_time(seconds: f32) -> String {
+    let seconds = seconds.max(0.0) as u32;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 fn segment_label(bank: &Bank, segment: &Segment) -> String {
