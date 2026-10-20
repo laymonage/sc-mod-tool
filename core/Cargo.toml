@@ -11,6 +11,7 @@ uelib-bridge = []
 
 [dependencies]
 encoding_rs = "0.8"
+memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

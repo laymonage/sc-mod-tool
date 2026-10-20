@@ -4,14 +4,15 @@
 //! vgmstream opens files through callbacks here, by names relative to
 //! `Sounds`, so it can't read outside that folder.
 
-use std::borrow::Cow;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+use memmap2::Mmap;
 
 use crate::Error;
 
@@ -352,60 +353,34 @@ fn read_file_at(file: &mut File, offset: u64, destination: &mut [u8]) -> usize {
 }
 
 /// A file several vgmstream instances read at once, such as a sound map whose
-/// sounds are being listed, which is opened once and keeps the blocks they
-/// read in memory, up to a limit.
+/// sounds are being listed, which is mapped into memory once for all of them.
 ///
 /// vgmstream reads a map's whole index again for each sound it opens, through
 /// a new 32 KiB buffer each time. Listing all of `MAPS.SM0`'s sounds that way
-/// reads about 25 GB from the file, all from the same 4 MiB.
+/// reads about 25 GB from the file, all from the same 4 MiB, which the
+/// operating system keeps in memory for the mapping.
 pub(crate) struct SharedFile {
     /// The path relative to `Sounds`, with `/` separators.
     name: CString,
     size: i64,
-    limit: usize,
-    /// The file's blocks of [`BLOCK_SIZE`] bytes, each set once it's read
-    /// while there's room. Threads read set blocks without taking the lock.
-    blocks: Box<[OnceLock<Box<[u8]>>]>,
-    state: Mutex<SharedState>,
+    map: Mmap,
 }
-
-/// What reading a block from the file needs.
-struct SharedState {
-    file: File,
-    cached_bytes: usize,
-}
-
-const BLOCK_SIZE: u64 = 0x10000;
-/// How much of a shared file is kept in memory. Listing a map's sounds needs
-/// about 4 MiB of `MAPS.SM0` and 2 MiB of a language's `MAPS.LM0`.
-const SHARED_FILE_LIMIT: usize = 16 * 1024 * 1024;
 
 impl SharedFile {
     /// Opens `relative_path` under `sounds`, which must be canonical.
     pub(crate) fn open(sounds: &Path, relative_path: &str) -> Result<Arc<Self>, String> {
-        Self::with_limit(sounds, relative_path, SHARED_FILE_LIMIT)
-    }
-
-    fn with_limit(sounds: &Path, relative_path: &str, limit: usize) -> Result<Arc<Self>, String> {
         let could_not_open = || format!("Could not open {relative_path}.");
         let (path, name) = resolve_sound_path(sounds, relative_path).ok_or_else(could_not_open)?;
         let file = File::open(&path).map_err(|_| could_not_open())?;
-        let length = file.metadata().map_err(|_| could_not_open())?.len();
-        let (Ok(size), Ok(block_count)) = (
-            i64::try_from(length),
-            usize::try_from(length.div_ceil(BLOCK_SIZE)),
-        ) else {
-            return Err(could_not_open());
-        };
+        // SAFETY: the mapping is only sound while nothing changes the file.
+        // The game's files don't change while their sounds are listed, which
+        // is as long as a shared file lives. If one were truncated meanwhile,
+        // reading past its new end would crash the app.
+        let map = unsafe { Mmap::map(&file) }.map_err(|_| could_not_open())?;
         Ok(Arc::new(Self {
             name: CString::new(name).map_err(|_| could_not_open())?,
-            size,
-            limit,
-            blocks: (0..block_count).map(|_| OnceLock::new()).collect(),
-            state: Mutex::new(SharedState {
-                file,
-                cached_bytes: 0,
-            }),
+            size: i64::try_from(map.len()).map_err(|_| could_not_open())?,
+            map,
         }))
     }
 
@@ -414,50 +389,11 @@ impl SharedFile {
     }
 
     fn read_at(&self, offset: u64, destination: &mut [u8]) -> usize {
-        let mut read = 0;
-        while read < destination.len() {
-            let Some(position) = offset.checked_add(read as u64) else {
-                break;
-            };
-            let block = self.block(position / BLOCK_SIZE);
-            let Some(available) = block
-                .get((position % BLOCK_SIZE) as usize..)
-                .filter(|available| !available.is_empty())
-            else {
-                break;
-            };
-            let count = available.len().min(destination.len() - read);
-            destination[read..read + count].copy_from_slice(&available[..count]);
-            read += count;
-        }
-        read
-    }
-
-    /// The block at `index`, which is empty past the end of the file. A block
-    /// is read from the file once, and kept while there's room.
-    fn block(&self, index: u64) -> Cow<'_, [u8]> {
-        let Some(slot) = usize::try_from(index)
-            .ok()
-            .and_then(|index| self.blocks.get(index))
-        else {
-            return Cow::Borrowed(&[]);
-        };
-        if let Some(block) = slot.get() {
-            return Cow::Borrowed(block);
-        }
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        // Another thread may have read it while this one waited.
-        if let Some(block) = slot.get() {
-            return Cow::Borrowed(block);
-        }
-        let mut bytes = vec![0; BLOCK_SIZE as usize];
-        let length = read_file_at(&mut state.file, index * BLOCK_SIZE, &mut bytes);
-        bytes.truncate(length);
-        if state.cached_bytes + length > self.limit {
-            return Cow::Owned(bytes);
-        }
-        state.cached_bytes += length;
-        Cow::Borrowed(slot.get_or_init(|| bytes.into_boxed_slice()))
+        let start =
+            usize::try_from(offset).map_or(self.map.len(), |offset| offset.min(self.map.len()));
+        let end = start.saturating_add(destination.len()).min(self.map.len());
+        destination[..end - start].copy_from_slice(&self.map[start..end]);
+        end - start
     }
 }
 
@@ -601,16 +537,15 @@ mod tests {
     #[test]
     fn reads_files_at_any_offset() {
         let game = tempfile::tempdir().unwrap();
-        // vgmstream's buffer is 0x8000 bytes, and shared files keep blocks
-        // of 0x10000.
+        // vgmstream's buffer is 0x8000 bytes.
         let block = 0x8000;
-        let bytes: Vec<u8> = (0..0x30000 + 10).map(|index| (index % 251) as u8).collect();
+        let bytes: Vec<u8> = (0..block * 2 + 10)
+            .map(|index| (index % 251) as u8)
+            .collect();
         fs::write(game.path().join("MAPS.SM0"), &bytes).unwrap();
         let sounds = game.path().canonicalize().unwrap();
 
-        // Shared files keep two blocks in memory, and read the rest from
-        // the file each time.
-        let shared = SharedFile::with_limit(&sounds, "MAPS.SM0", 2 * BLOCK_SIZE as usize).unwrap();
+        let shared = SharedFile::open(&sounds, "MAPS.SM0").unwrap();
         for shared in [None, Some(&shared)] {
             let file = SoundFile::open(&sounds, "MAPS.SM0", shared).unwrap();
             let file = unsafe { libstreamfile_open_buffered(file) };
@@ -627,14 +562,7 @@ mod tests {
                 destination.truncate(count as usize);
                 destination
             };
-            for (offset, length) in [
-                (0x1000, 16),
-                (0, 16),
-                (block - 4, 8),
-                (5, 0x10000),
-                (0x1fff0, 0x20),
-                (0x2fffc, 8),
-            ] {
+            for (offset, length) in [(0x1000, 16), (0, 16), (block - 4, 8), (5, 0x10000)] {
                 assert_eq!(
                     read(offset, length),
                     bytes[offset..(offset + length).min(bytes.len())]
@@ -643,8 +571,10 @@ mod tests {
             assert!(read(bytes.len(), 4).is_empty());
             unsafe { libstreamfile_close(file) };
         }
-        let state = shared.state.lock().unwrap();
-        assert_eq!(state.cached_bytes, 2 * BLOCK_SIZE as usize);
+
+        fs::write(game.path().join("EMPTY.SM0"), []).unwrap();
+        let empty = SharedFile::open(&sounds, "EMPTY.SM0").unwrap();
+        assert_eq!(empty.read_at(0, &mut [0; 4]), 0);
     }
 
     #[test]
