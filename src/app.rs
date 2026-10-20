@@ -675,10 +675,11 @@ impl eframe::App for SCModToolApp {
         {
             self.stop_playback();
         }
+        // A paused segment can't finish, so it doesn't need repainting.
         let is_playing = self
             .active_playback
             .as_ref()
-            .is_some_and(|playback| !playback.stopped);
+            .is_some_and(|playback| !playback.stopped && !playback.sink.is_paused());
 
         // Keep repainting while work is in progress, so finished playback is
         // noticed without waiting for input.
