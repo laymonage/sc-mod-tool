@@ -27,20 +27,25 @@ pub(super) struct SoundMap<'a> {
     pub(super) banks: Vec<&'a crate::Bank>,
 }
 
-/// The duration of the clip a key's map record describes, from the first map
-/// that has the key.
+/// The duration of the clip a key's map records describe, from the first map
+/// that has the key, or `None` when its records disagree. Keys repeat across
+/// areas, sometimes for different clips: `0x00130006` is a character's bark in
+/// some areas and one of Lambert's alarm warnings in others.
 pub(super) fn clip_seconds(key: u32, maps: &[SoundMap]) -> Option<f64> {
-    let record = maps
+    let mut durations = maps
         .iter()
         .find_map(|map| map.records.get(&key))?
         .iter()
-        .next()?;
-    let rate = if record.sample_rate == 0 {
-        36000
-    } else {
-        record.sample_rate
-    };
-    Some(f64::from(record.sample_count) / f64::from(rate))
+        .map(|record| {
+            let rate = if record.sample_rate == 0 {
+                36000
+            } else {
+                record.sample_rate
+            };
+            f64::from(record.sample_count) / f64::from(rate)
+        });
+    let first = durations.next()?;
+    durations.all(|duration| duration == first).then_some(first)
 }
 
 /// Reads a `MAPS.LM0`'s audio, by the keys of the events that play it.
@@ -375,5 +380,27 @@ mod tests {
         let segment = resolve_segment("Lambert.Play_AlarmStage1Opt1", 0x660005, &maps[0]).unwrap();
 
         assert_eq!(segment.id, "ENGLISH/MAPS.LM0#1");
+    }
+
+    #[test]
+    fn has_no_clip_length_when_a_keys_records_disagree() {
+        let banks = test_bank(&[]);
+        let mut records = test_records(&[(1, 0), (2, 0)]);
+        let record = records[&1].iter().next().unwrap().clone();
+        // Key 1 has a second record of the same length elsewhere in the
+        // map, and key 2 one of another length.
+        records.get_mut(&1).unwrap().insert(MapRecord {
+            offset: 100,
+            ..record.clone()
+        });
+        records.get_mut(&2).unwrap().insert(MapRecord {
+            sample_count: 40,
+            ..record
+        });
+        let maps = test_maps(records, &banks);
+
+        assert_eq!(clip_seconds(1, &maps), Some(20.0 / 36000.0));
+        assert_eq!(clip_seconds(2, &maps), None);
+        assert_eq!(clip_seconds(3, &maps), None);
     }
 }
