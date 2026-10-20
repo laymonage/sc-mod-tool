@@ -39,7 +39,18 @@ cross-compiled to another OS. To build without it, pass
 
 The bridge library (`SCModUELibBridge.dll`, `libSCModUELibBridge.dylib` or
 `libSCModUELibBridge.so`) is copied next to the executable and must ship with
-it. When redistributing, include vgmstream's license notices.
+it.
+
+When redistributing, include the license notices of the third-party code built
+into the app and the bridge:
+
+- **vgmstream**, which decodes the audio, is built into the app:
+  [`vendor/vgmstream/COPYING`](vendor/vgmstream/COPYING).
+- **UELib**, which reads the game's scripts, is built into the bridge: MIT,
+  [license](https://github.com/EliotVU/Unreal-Library/blob/master/LICENSE).
+- **The .NET runtime** is compiled into the bridge by Native AOT: MIT, with its
+  [license](https://github.com/dotnet/runtime/blob/main/LICENSE.TXT) and
+  [third-party notices](https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT).
 
 ## Game-data test
 
