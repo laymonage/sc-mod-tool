@@ -3,3 +3,4 @@ target/
 /core/uelib-bridge/obj/
 /core/uelib-bridge-tests/bin/
 /core/uelib-bridge-tests/obj/
+/dist/
