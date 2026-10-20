@@ -1,6 +1,7 @@
 mod ui;
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -40,6 +41,35 @@ enum WorkerMessage {
         destination: PathBuf,
         result: Result<(), Error>,
     },
+    BankExportProgress {
+        completed: usize,
+    },
+    BankExport {
+        result: Result<BankExportSummary, Error>,
+    },
+}
+
+/// A bank's segments being saved as WAV files, one after another.
+struct BankExport {
+    label: String,
+    completed: usize,
+    total: usize,
+    cancel: Arc<AtomicBool>,
+}
+
+impl BankExport {
+    fn is_cancelling(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+/// What exporting a bank did.
+struct BankExportSummary {
+    folder: PathBuf,
+    exported: usize,
+    /// Each segment that couldn't be exported, with why.
+    failures: Vec<String>,
+    cancelled: bool,
 }
 
 enum ScanProgress {
@@ -156,8 +186,10 @@ pub struct SCModToolApp {
     /// of the playback position until it is released.
     seek_drag: Option<f32>,
     audio: AudioOutput,
-    /// Where the last segment was exported, to start there next time.
+    /// Where the last segment or bank was exported, to start there next time.
     export_directory: Option<PathBuf>,
+    /// Only one bank is exported at a time.
+    bank_export: Option<BankExport>,
     status: Status,
 
     bank_filter: String,
@@ -198,6 +230,7 @@ impl SCModToolApp {
             seek_drag: None,
             audio: AudioOutput::default(),
             export_directory: None,
+            bank_export: None,
             status: Status {
                 message: String::new(),
                 is_error: false,
@@ -543,6 +576,94 @@ impl SCModToolApp {
         });
     }
 
+    /// Asks for a folder, then saves each of the selected bank's segments as a
+    /// WAV file in a folder named after the bank inside it.
+    fn export_bank(&mut self, ctx: &egui::Context) {
+        if self.bank_export.is_some() {
+            return;
+        }
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let Some(bank) = self.selected_bank() else {
+            return;
+        };
+        let label = ui::bank_title(bank);
+        let mut dialog = rfd::FileDialog::new().set_title(format!("Export {label} to a folder"));
+        if let Some(directory) = &self.export_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(parent) = dialog.pick_folder() else {
+            return;
+        };
+        let folder = parent.join(ui::export_folder_name(bank));
+        let bank_path = bank.path.clone();
+        let files: Vec<_> = bank
+            .segments
+            .iter()
+            .cloned()
+            .zip(ui::export_file_names(bank))
+            .collect();
+        let total = files.len();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.export_directory = Some(parent);
+        self.bank_export = Some(BankExport {
+            label,
+            completed: 0,
+            total,
+            cancel: Arc::clone(&cancelled),
+        });
+        let sender = self.sender.clone();
+        let repaint = ctx.clone();
+
+        thread::spawn(move || {
+            let send = |message| {
+                let _ = sender.send(message);
+                repaint.request_repaint();
+            };
+            if let Err(error) = fs::create_dir_all(&folder) {
+                send(WorkerMessage::BankExport {
+                    result: Err(format!("Could not create {}: {error}", folder.display()).into()),
+                });
+                return;
+            }
+            let mut summary = BankExportSummary {
+                folder,
+                exported: 0,
+                failures: Vec::new(),
+                cancelled: false,
+            };
+            for (completed, (segment, file_name)) in files.into_iter().enumerate() {
+                send(WorkerMessage::BankExportProgress { completed });
+                match sc_mod_tool_core::export_segment(
+                    &root,
+                    &bank_path,
+                    &segment,
+                    &summary.folder.join(&file_name),
+                    &cancelled,
+                ) {
+                    Ok(()) => summary.exported += 1,
+                    Err(Error::Cancelled) => {
+                        summary.cancelled = true;
+                        break;
+                    }
+                    // One segment that can't be decoded shouldn't stop the
+                    // rest from being exported.
+                    Err(error) => summary.failures.push(format!("{file_name}: {error}")),
+                }
+            }
+            send(WorkerMessage::BankExport {
+                result: Ok(summary),
+            });
+        });
+    }
+
+    fn cancel_bank_export(&mut self) {
+        if let Some(export) = &self.bank_export {
+            export.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
     /// Stops playback, keeping the segment in the status bar so it can be
     /// played again.
     fn stop_playback(&mut self) {
@@ -667,6 +788,16 @@ impl SCModToolApp {
                         self.set_status(format!("Could not export {label}: {error}"), true)
                     }
                 },
+                WorkerMessage::BankExportProgress { completed } => {
+                    if let Some(export) = &mut self.bank_export {
+                        export.completed = completed;
+                    }
+                }
+                WorkerMessage::BankExport { result } => {
+                    if let Some(export) = self.bank_export.take() {
+                        self.finish_bank_export(&export, result);
+                    }
+                }
             }
         }
     }
@@ -712,6 +843,42 @@ impl SCModToolApp {
                 ),
                 false,
             ),
+        }
+    }
+
+    fn finish_bank_export(
+        &mut self,
+        export: &BankExport,
+        result: Result<BankExportSummary, Error>,
+    ) {
+        let label = &export.label;
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) => {
+                self.set_status(format!("Could not export {label}: {error}"), true);
+                return;
+            }
+        };
+        let folder = summary.folder.display();
+        let exported = summary.exported;
+        let total = export.total;
+        if summary.cancelled {
+            self.set_status(
+                format!(
+                    "Export cancelled after saving {exported} of {total} segments to {folder}."
+                ),
+                false,
+            );
+        } else if let Some(first) = summary.failures.first() {
+            let failed = summary.failures.len();
+            self.set_status(
+                format!(
+                    "Exported {exported} of {total} segments to {folder}. {failed} could not be exported, such as {first}"
+                ),
+                true,
+            );
+        } else {
+            self.set_status(format!("Exported {label} to {folder}."), false);
         }
     }
 

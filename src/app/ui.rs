@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use eframe::egui::{
@@ -33,6 +34,8 @@ enum Action {
     TogglePlayback(usize),
     PlayOrPause(usize),
     Export(usize),
+    ExportBank,
+    CancelBankExport,
     TogglePause,
     /// Move the seeker without seeking yet, or stop moving it.
     DragSeek(Option<f32>),
@@ -90,6 +93,8 @@ impl SCModToolApp {
                 self.selected_segment = Some(index);
                 self.export_segment(ctx, index);
             }
+            Action::ExportBank => self.export_bank(ctx),
+            Action::CancelBankExport => self.cancel_bank_export(),
             Action::TogglePause => self.toggle_pause(),
             Action::DragSeek(position) => self.seek_drag = position,
             Action::Seek(position) => self.seek(position),
@@ -230,6 +235,25 @@ impl SCModToolApp {
                             // Still being decoded.
                             ui.spinner();
                         }
+                        ui.separator();
+                    }
+                    if let Some(export) = &self.bank_export {
+                        if export.is_cancelling() {
+                            ui.label("Cancelling export…");
+                        } else {
+                            if ui.button("Cancel").clicked() {
+                                actions.push(Action::CancelBankExport);
+                            }
+                            ui.add(
+                                egui::ProgressBar::new(
+                                    export.completed as f32 / export.total.max(1) as f32,
+                                )
+                                .desired_width(180.0)
+                                .text(format!("{} / {} segments", export.completed, export.total)),
+                            );
+                            ui.label(format!("Exporting {}", export.label));
+                        }
+                        ui.spinner();
                         ui.separator();
                     }
                     // The status takes whatever space the controls leave.
@@ -425,6 +449,21 @@ impl SCModToolApp {
                 )
             };
             ui.label(RichText::new(format!("{mission}{contents}")).weak());
+            if bank.issue.is_none() && !bank.segments.is_empty() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let exporting = self.bank_export.is_some();
+                    let button = ui
+                        .add_enabled(
+                            !exporting,
+                            egui::Button::new(format!("{} Export bank…", ICON_DOWNLOAD.codepoint)),
+                        )
+                        .on_hover_text("Save every segment as a WAV file.")
+                        .on_disabled_hover_text("Another bank is being exported.");
+                    if button.clicked() {
+                        actions.push(Action::ExportBank);
+                    }
+                });
+            }
         });
         if let Some(issue) = &bank.issue {
             ui.add_space(8.0);
@@ -1160,18 +1199,67 @@ pub(super) fn segment_label(bank: &Bank, segment: &Segment) -> String {
 /// `ROGEAR_2.wav`, or else its bank's file and its number, such as
 /// `1_1_1-12.wav`.
 pub(super) fn export_file_name(bank: &Bank, segment: &Segment) -> String {
-    let name = segment.name.clone().unwrap_or_else(|| {
-        let file = bank.path.rsplit('/').next().unwrap_or(&bank.path);
-        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-        format!("{stem}-{}", segment.segment + 1)
-    });
-    // Names can be descriptions, which may hold characters some systems don't
-    // allow in file names.
-    let name: String = name
-        .chars()
+    format!("{}.wav", export_file_stem(bank, segment))
+}
+
+/// The file names a bank's segments are exported as, in its order. Map sounds
+/// can share a name, so later ones are numbered, such as `Music (2).wav`.
+/// Names are compared ignoring case, as macOS and Windows do.
+pub(super) fn export_file_names(bank: &Bank) -> Vec<String> {
+    let mut taken = HashSet::new();
+    bank.segments
+        .iter()
+        .map(|segment| {
+            let stem = export_file_stem(bank, segment);
+            let mut name = stem.clone();
+            let mut copy = 1;
+            while !taken.insert(name.to_lowercase()) {
+                copy += 1;
+                name = format!("{stem} ({copy})");
+            }
+            format!("{name}.wav")
+        })
+        .collect()
+}
+
+fn export_file_stem(bank: &Bank, segment: &Segment) -> String {
+    let name = segment
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", bank_file_stem(bank), segment.segment + 1));
+    file_name_safe(&name)
+}
+
+/// The folder a bank is exported to: its file's name, such as `1_1_1`, or a
+/// sound map's name and the kind of sounds, such as `MAPS.SM0 - Music`, after
+/// its extra map's folder when it has one.
+pub(super) fn export_folder_name(bank: &Bank) -> String {
+    let file = bank_file_name(bank);
+    let mut parts: Vec<&str> = bank.map.iter().map(String::as_str).collect();
+    match bank.sound_kind {
+        // A language's sound map has the same name as the shared one, with
+        // another extension.
+        Some(_) => parts.extend([file, bank.name.as_str()]),
+        None => parts.push(bank_file_stem(bank)),
+    }
+    file_name_safe(&parts.join(" - "))
+}
+
+fn bank_file_name(bank: &Bank) -> &str {
+    bank.path.rsplit('/').next().unwrap_or(&bank.path)
+}
+
+fn bank_file_stem(bank: &Bank) -> &str {
+    let file = bank_file_name(bank);
+    file.rsplit_once('.').map_or(file, |(stem, _)| stem)
+}
+
+/// Replaces characters some systems don't allow in file names, which map
+/// sounds' names, being descriptions, may hold.
+fn file_name_safe(name: &str) -> String {
+    name.chars()
         .map(|c| if r#"/\:*?"<>|"#.contains(c) { '_' } else { c })
-        .collect();
-    format!("{name}.wav")
+        .collect()
 }
 
 /// The bank's mission name, or its extra map's folder when `HUD` doesn't name
@@ -1186,7 +1274,7 @@ fn mission_label(bank: &Bank) -> Option<&str> {
 
 /// The bank's name, after its extra map's when it has one, since maps reuse
 /// bank names.
-fn bank_title(bank: &Bank) -> String {
+pub(super) fn bank_title(bank: &Bank) -> String {
     match &bank.map {
         Some(map) => format!("{map} / {}", bank.name),
         None => bank.name.clone(),
@@ -1248,6 +1336,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sc_mod_tool_core::SoundKind;
 
     fn segment(sample_count: u32, sample_rate: u32) -> Segment {
         Segment {
@@ -1274,5 +1363,81 @@ mod tests {
         assert_eq!(duration(119_960), "2:00.0");
         assert_eq!(duration(125_040), "2:05.0");
         assert_eq!(duration(3_599_960), "60:00.0");
+    }
+
+    fn bank(path: &str, map: Option<&str>, sound_kind: Option<SoundKind>) -> Bank {
+        Bank {
+            name: sound_kind.map_or_else(
+                || path.rsplit('/').next().unwrap().to_owned(),
+                |_| "Music".to_owned(),
+            ),
+            map: map.map(str::to_owned),
+            sound_kind,
+            path: path.to_owned(),
+            code: String::new(),
+            mission_name: None,
+            size: 0,
+            issue: None,
+            segments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn names_export_folders_after_banks() {
+        assert_eq!(
+            export_folder_name(&bank("ENGLISH/1_1_1.LS0", None, None)),
+            "1_1_1"
+        );
+        assert_eq!(
+            export_folder_name(&bank("ENGLISH/MAPS.LM0", None, Some(SoundKind::Music))),
+            "MAPS.LM0 - Music"
+        );
+        assert_eq!(
+            export_folder_name(&bank(
+                "1_6_1_1kolacell/MAPS.SM0",
+                Some("1_6_1_1kolacell"),
+                Some(SoundKind::Music)
+            )),
+            "1_6_1_1kolacell - MAPS.SM0 - Music"
+        );
+    }
+
+    #[test]
+    fn numbers_exported_sounds_that_share_a_name() {
+        let mut bank = bank("MAPS.SM0", None, Some(SoundKind::Music));
+        let named = |name: &str| Segment {
+            name: Some(name.to_owned()),
+            ..segment(1, 1)
+        };
+        bank.segments = vec![
+            named("Sequence (multi-loop)"),
+            named("ROGEAR_2"),
+            named("sequence (multi-loop)"),
+            named("Sequence (multi-loop)"),
+            named("a/b"),
+        ];
+        assert_eq!(
+            export_file_names(&bank),
+            [
+                "Sequence (multi-loop).wav",
+                "ROGEAR_2.wav",
+                "sequence (multi-loop) (2).wav",
+                "Sequence (multi-loop) (3).wav",
+                "a_b.wav",
+            ]
+        );
+    }
+
+    #[test]
+    fn names_exported_stream_segments_by_bank_and_number() {
+        let mut bank = bank("ENGLISH/1_1_1.LS0", None, None);
+        bank.segments = vec![
+            segment(1, 1),
+            Segment {
+                segment: 1,
+                ..segment(1, 1)
+            },
+        ];
+        assert_eq!(export_file_names(&bank), ["1_1_1-1.wav", "1_1_1-2.wav"]);
     }
 }
