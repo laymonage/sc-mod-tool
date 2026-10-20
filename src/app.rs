@@ -2,9 +2,9 @@ mod ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -30,7 +30,6 @@ enum WorkerMessage {
         request: u64,
         result: Result<Vec<Bank>, Error>,
         subtitles: Result<SubtitleAnalysis, Error>,
-        game_cache: GameCache,
     },
     Playback {
         request: u64,
@@ -136,8 +135,10 @@ pub struct SCModToolApp {
     selected_segment: Option<usize>,
     subtitles: HashMap<String, Vec<Subtitle>>,
     subtitle_warnings: Vec<String>,
-    /// What scans of the selected game reuse when switching languages.
-    game_cache: GameCache,
+    /// What scans of the selected game reuse when switching languages. Only
+    /// scan workers lock it, one at a time, so a scan keeps what the scan it
+    /// replaced had read. A new game or a rescan gets a new one.
+    game_cache: Arc<Mutex<GameCache>>,
 
     language_request: u64,
     scan_request: u64,
@@ -179,7 +180,7 @@ impl SCModToolApp {
             selected_segment: None,
             subtitles: HashMap::new(),
             subtitle_warnings: Vec::new(),
-            game_cache: GameCache::default(),
+            game_cache: Arc::default(),
             language_request: 0,
             scan_request: 0,
             playback_request: 0,
@@ -226,7 +227,7 @@ impl SCModToolApp {
         self.languages.clear();
         self.selected_language = None;
         self.clear_banks();
-        self.game_cache = GameCache::default();
+        self.game_cache = Arc::default();
         self.discovering_languages = true;
         self.language_request = self.language_request.wrapping_add(1);
         let request = self.language_request;
@@ -251,7 +252,7 @@ impl SCModToolApp {
     fn rescan(&mut self, ctx: &egui::Context) {
         // Rescanning re-reads the game files, including its scripts and
         // shared sound maps.
-        self.game_cache = GameCache::default();
+        self.game_cache = Arc::default();
         self.start_scan(ctx);
     }
 
@@ -273,12 +274,16 @@ impl SCModToolApp {
         let request = self.scan_request;
         let cancelled = Arc::new(AtomicBool::new(false));
         self.scan_cancel = Some(Arc::clone(&cancelled));
-        let mut game_cache = self.game_cache.clone();
+        let game_cache = Arc::clone(&self.game_cache);
         let sender = self.sender.clone();
         let repaint = ctx.clone();
         self.set_status("Scanning sound banks...", false);
 
         thread::spawn(move || {
+            // A cancelled scan may still be using the cache, until UELib
+            // finishes if it's running. What it read is then kept for this
+            // one.
+            let mut game_cache = game_cache.lock().unwrap_or_else(PoisonError::into_inner);
             let send_progress = |progress| {
                 let _ = sender.send(WorkerMessage::ScanProgress { request, progress });
                 repaint.request_repaint();
@@ -318,7 +323,6 @@ impl SCModToolApp {
                 request,
                 result,
                 subtitles,
-                game_cache,
             });
             repaint.request_repaint();
         });
@@ -553,12 +557,10 @@ impl SCModToolApp {
                     request,
                     result,
                     subtitles,
-                    game_cache,
                 } => {
                     if request != self.scan_request {
                         continue;
                     }
-                    self.game_cache = game_cache;
                     self.scan_cancel = None;
                     self.scan_progress = None;
                     match result {
