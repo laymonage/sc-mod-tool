@@ -9,11 +9,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::missions::mission_code;
 use crate::sounds_folder::find_file;
-use crate::vgmstream::{SoundInfo, Vgmstream};
+use crate::vgmstream::{SharedFile, SoundInfo, Vgmstream};
 use crate::{Bank, Error, Segment, SegmentSource};
 
 /// The map files, relative to `Sounds`, that have the sounds for a language
@@ -87,14 +88,21 @@ pub(crate) fn read_map_banks(
         segments: Vec::new(),
     };
 
-    let first = match Vgmstream::new()?.open(sounds, path, 1) {
+    let map_file = match SharedFile::open(sounds, path) {
+        Ok(map_file) => map_file,
+        Err(error) => return Ok(vec![unreadable(error)]),
+    };
+    let first = match Vgmstream::new()?
+        .sharing(Arc::clone(&map_file))
+        .open(sounds, path, 1)
+    {
         Ok(first) => first,
         Err(error) => return Ok(vec![unreadable(error)]),
     };
     let sound_count = first.subsong_count.max(1);
     let mut lists = SoundLists::default();
     let mut failures = 0;
-    for (subsong, info) in open_sounds(sounds, path, sound_count, cancelled)? {
+    for (subsong, info) in open_sounds(sounds, path, &map_file, sound_count, cancelled)? {
         match info {
             Some(info) => lists.add(path, subsong, is_localized, info),
             None => failures += 1,
@@ -220,11 +228,13 @@ impl SoundLists {
 /// returning them in order, with `None` for those vgmstream can't open.
 ///
 /// vgmstream reads the map's index again to open each sound, so this is spread
-/// over several threads, each with its own vgmstream. Opening a sound takes
-/// longer the later it is in the map, so threads take turns.
+/// over several threads, each with its own vgmstream, which all read the map
+/// through `map_file`. Opening a sound takes longer the later it is in the
+/// map, so threads take turns.
 fn open_sounds(
     sounds: &Path,
     path: &str,
+    map_file: &Arc<SharedFile>,
     count: u32,
     cancelled: &AtomicBool,
 ) -> Result<Vec<(u32, Option<SoundInfo>)>, Error> {
@@ -234,7 +244,7 @@ fn open_sounds(
         let workers: Vec<_> = (1..=threads.min(count))
             .map(|first| {
                 scope.spawn(move || -> Result<Vec<_>, Error> {
-                    let mut vgmstream = Vgmstream::new()?;
+                    let mut vgmstream = Vgmstream::new()?.sharing(Arc::clone(map_file));
                     let mut sounds_opened = Vec::new();
                     for subsong in (first..=count).step_by(threads as usize) {
                         if cancelled.load(Ordering::Relaxed) {
