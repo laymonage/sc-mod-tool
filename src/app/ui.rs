@@ -433,37 +433,43 @@ impl SCModToolApp {
         let bank = &self.banks[bank_index];
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&bank.name).heading());
-            let mission = mission_label(bank)
-                .map(|mission| format!("{mission} · "))
-                .unwrap_or_default();
-            let contents = if bank.sound_kind.is_some() {
-                // A map's banks share its file, so its size isn't theirs.
-                format!("{} sounds · {}", bank.segments.len(), bank.path)
-            } else {
-                format!(
-                    "{} segments · {}",
-                    bank.segments.len(),
-                    format_bytes(bank.size)
-                )
-            };
-            ui.label(RichText::new(format!("{mission}{contents}")).weak());
+        // The button is laid out first so it keeps its place on the right, and
+        // the title and details wrap in the space left of it.
+        let initial_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        ui.allocate_ui_with_layout(initial_size, Layout::right_to_left(Align::Min), |ui| {
             if bank.issue.is_none() && !bank.segments.is_empty() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let exporting = self.bank_export.is_some();
-                    let button = ui
-                        .add_enabled(
-                            !exporting,
-                            egui::Button::new(format!("{} Export bank…", ICON_DOWNLOAD.codepoint)),
-                        )
-                        .on_hover_text("Save every segment as a WAV file.")
-                        .on_disabled_hover_text("Another bank is being exported.");
-                    if button.clicked() {
-                        actions.push(Action::ExportBank);
-                    }
-                });
+                let exporting = self.bank_export.is_some();
+                let button = ui
+                    .add_enabled(
+                        !exporting,
+                        egui::Button::new(format!("{} Export bank…", ICON_DOWNLOAD.codepoint)),
+                    )
+                    .on_hover_text("Save every segment as a WAV file.")
+                    .on_disabled_hover_text("Another bank is being exported.");
+                if button.clicked() {
+                    actions.push(Action::ExportBank);
+                }
             }
+            ui.with_layout(
+                Layout::left_to_right(Align::Center).with_main_wrap(true),
+                |ui| {
+                    ui.label(RichText::new(&bank.name).heading());
+                    let mission = mission_label(bank)
+                        .map(|mission| format!("{mission} · "))
+                        .unwrap_or_default();
+                    let contents = if bank.sound_kind.is_some() {
+                        // A map's banks share its file, so its size isn't theirs.
+                        format!("{} sounds · {}", bank.segments.len(), bank.path)
+                    } else {
+                        format!(
+                            "{} segments · {}",
+                            bank.segments.len(),
+                            format_bytes(bank.size)
+                        )
+                    };
+                    ui.label(RichText::new(format!("{mission}{contents}")).weak());
+                },
+            );
         });
         if let Some(issue) = &bank.issue {
             ui.add_space(8.0);
