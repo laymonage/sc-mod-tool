@@ -207,23 +207,9 @@ fn sound_package_bank_code(sound_event: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sound_map_file::tests::{TestResource, write_u32};
-    use crate::sound_map_file::{self, AREA_SIZE, EVENT_SIZE, NORMAL_PITCH};
+    use crate::sound_map_file::tests::{test_map, write_u32};
+    use crate::sound_map_file::{AREA_SIZE, EVENT_SIZE};
     use crate::subtitles::tests::{test_bank, test_maps, test_records};
-
-    /// A map with one area, whose events play the resources at the given
-    /// indexes, each an audio clip with the given key at offset `key * 100`.
-    fn test_map(events: &[(u32, u32)], resource_keys: &[u32]) -> Vec<u8> {
-        let events: Vec<_> = events
-            .iter()
-            .map(|&(key, resource)| (key, resource, NORMAL_PITCH))
-            .collect();
-        let resources: Vec<_> = resource_keys
-            .iter()
-            .map(|&key| TestResource::Audio(key))
-            .collect();
-        sound_map_file::tests::test_map(&events, &resources)
-    }
 
     #[test]
     fn finds_audio_through_the_events_that_play_it() {
@@ -367,7 +353,6 @@ mod tests {
             subsong: 1,
             key: Some(0x660002),
             areas: Vec::new(),
-            pitch: NORMAL_PITCH,
         };
         banks.push(voices);
         let mut records = test_records(&[(0x660005, 0)]);

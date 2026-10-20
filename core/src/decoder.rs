@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::Error;
-use crate::sound_map_file::pitched_sample_rate;
 use crate::vgmstream::Vgmstream;
 
 unsafe extern "C" {
@@ -86,12 +85,11 @@ pub fn decode(
 }
 
 /// Decodes sound `subsong` of the sound map at `map_path` under `sounds`,
-/// which must be canonical, to play at `pitch` (16.16 fixed point).
+/// which must be canonical.
 pub(crate) fn decode_map_sound(
     sounds: &Path,
     map_path: &str,
     subsong: u32,
-    pitch: u32,
     cancelled: &AtomicBool,
 ) -> Result<DecodedAudio, Error> {
     let mut vgmstream = Vgmstream::new()?;
@@ -107,7 +105,7 @@ pub(crate) fn decode_map_sound(
     }
     Ok(DecodedAudio {
         samples,
-        sample_rate: pitched_sample_rate(sound.sample_rate, pitch),
+        sample_rate: sound.sample_rate,
         channels,
     })
 }

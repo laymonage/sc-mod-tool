@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::missions::mission_code;
-use crate::sound_map_file::{NORMAL_PITCH, SoundMapFile, pitched_sample_rate};
 use crate::sounds_folder::find_file;
 use crate::vgmstream::{SoundInfo, Vgmstream};
 use crate::{Bank, Error, Segment, SegmentSource};
@@ -93,10 +92,7 @@ pub(crate) fn read_map_banks(
         Err(error) => return Ok(vec![unreadable(error)]),
     };
     let sound_count = first.subsong_count.max(1);
-    let mut lists = SoundLists {
-        pitches: clip_pitches(sounds, path, is_localized),
-        ..SoundLists::default()
-    };
+    let mut lists = SoundLists::default();
     let mut failures = 0;
     for (subsong, info) in open_sounds(sounds, path, sound_count, cancelled)? {
         match info {
@@ -141,9 +137,6 @@ struct SoundLists {
     /// The IDs of sounds without a name of their own, which are listed by
     /// their stream file or kind of entry instead.
     unnamed: HashSet<String>,
-    /// The pitch the map's events play sounds at, by resource key, for those
-    /// not played at their stored sample rate.
-    pitches: HashMap<u32, u32>,
 }
 
 impl SoundLists {
@@ -178,11 +171,6 @@ impl SoundLists {
         if !entry.has_name() {
             self.unnamed.insert(id.clone());
         }
-        let pitch = entry
-            .key
-            .and_then(|key| self.pitches.get(&key))
-            .copied()
-            .unwrap_or(NORMAL_PITCH);
         segments.push(Segment {
             id,
             source: SegmentSource::MapSound {
@@ -193,11 +181,10 @@ impl SoundLists {
                     .filter(|area| !area.is_empty())
                     .map(str::to_owned)
                     .collect(),
-                pitch,
             },
             name: Some(name),
             sample_count: info.sample_count,
-            sample_rate: pitched_sample_rate(info.sample_rate, pitch),
+            sample_rate: info.sample_rate,
             channels: info.channels,
             codec: info.codec,
             segment: 0,
@@ -227,21 +214,6 @@ impl SoundLists {
         }
         lists
     }
-}
-
-/// The pitch each clip in the map at `path` plays at, by resource key.
-///
-/// Only `MAPS.LM0`'s are read: `MAPS.SM0`'s events point at their sounds
-/// another way, and it's ten times the size, so its sounds keep their stored
-/// sample rates. A map that can't be read has no pitches.
-fn clip_pitches(sounds: &Path, path: &str, is_localized: bool) -> HashMap<u32, u32> {
-    if !is_localized {
-        return HashMap::new();
-    }
-    std::fs::read(sounds.join(path))
-        .ok()
-        .and_then(|data| Some(SoundMapFile::parse(&data).ok()?.clip_pitches()))
-        .unwrap_or_default()
 }
 
 /// Opens sounds 1 to `count` of the map at `path` to read their details,

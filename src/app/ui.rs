@@ -688,26 +688,12 @@ impl SCModToolApp {
                                         );
                                         detail_row(ui, "Offset", offset.to_string());
                                     }
-                                    SegmentSource::MapSound {
-                                        subsong,
-                                        key,
-                                        pitch,
-                                        ..
-                                    } => {
+                                    SegmentSource::MapSound { subsong, key, .. } => {
                                         if let Some(name) = &segment.name {
                                             detail_row(ui, "Name", name.clone());
                                         }
                                         detail_row(ui, "Key", format_key(key));
                                         detail_row(ui, "Map entry", subsong.to_string());
-                                        // The game pitches some voices down;
-                                        // the sample rate above includes it.
-                                        if pitch != 0x1_0000 {
-                                            detail_row(
-                                                ui,
-                                                "Pitch",
-                                                format!("{:.2}×", f64::from(pitch) / 65536.0),
-                                            );
-                                        }
                                     }
                                 }
                                 detail_row(ui, "File", bank.path.clone());
