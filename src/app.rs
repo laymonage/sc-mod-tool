@@ -903,6 +903,16 @@ pub fn setup_context(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     });
+    // egui's weak text is under 3:1 against the background, and its dark
+    // theme's normal text only just reaches 4.5:1. These are at least 4.5:1
+    // (WCAG AA), including on striped table rows.
+    ctx.style_mut_of(egui::Theme::Dark, |style| {
+        style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(185);
+        style.visuals.weak_text_color = Some(egui::Color32::from_gray(140));
+    });
+    ctx.style_mut_of(egui::Theme::Light, |style| {
+        style.visuals.weak_text_color = Some(egui::Color32::from_gray(105));
+    });
 }
 
 /// The storage key for the last game folder opened.

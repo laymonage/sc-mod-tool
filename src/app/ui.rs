@@ -357,7 +357,7 @@ impl SCModToolApp {
                     ui.spinner();
                     ui.label(self.scan_activity());
                 } else {
-                    ui.label(RichText::new("No sound banks to show").heading());
+                    ui.label(RichText::new("No sound banks to show").heading().strong());
                     ui.label(
                         RichText::new(
                             "Check the status bar below, then open another folder or rescan.",
@@ -455,7 +455,7 @@ impl SCModToolApp {
             ui.with_layout(
                 Layout::left_to_right(Align::Center).with_main_wrap(true),
                 |ui| {
-                    ui.label(RichText::new(&bank.name).heading());
+                    ui.label(RichText::new(&bank.name).heading().strong());
                     let mission = mission_label(bank)
                         .map(|mission| format!("{mission} · "))
                         .unwrap_or_default();
@@ -693,7 +693,9 @@ impl SCModToolApp {
                             "Segment"
                         };
                         ui.label(
-                            RichText::new(format!("{noun} {}", segment.segment + 1)).heading(),
+                            RichText::new(format!("{noun} {}", segment.segment + 1))
+                                .heading()
+                                .strong(),
                         );
                         ui.label(RichText::new(bank_title(bank)).weak());
                         ui.add_space(8.0);

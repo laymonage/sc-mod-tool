@@ -59,6 +59,9 @@ fn screenshots() {
     harness.set_size(egui::vec2(1200.0, 760.0));
     harness.state_mut().select_bank(bank);
     save(&mut harness, &out, "voice-bank");
+
+    harness.ctx.set_theme(egui::Theme::Light);
+    save(&mut harness, &out, "voice-bank-light");
 }
 
 fn wait_for_scan(harness: &mut Harness<SCModToolApp>) {
