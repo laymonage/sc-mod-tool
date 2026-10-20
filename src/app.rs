@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use sc_mod_tool_core::{
-    Bank, Error, Language, Segment,
+    Bank, Error, Language, Segment, SoundMapCache,
     decoder::DecodedAudio,
     subtitles::{CompiledLinks, Subtitle, SubtitleAnalysis},
 };
@@ -31,6 +31,7 @@ enum WorkerMessage {
         result: Result<Vec<Bank>, Error>,
         subtitles: Result<SubtitleAnalysis, Error>,
         compiled_links: Option<Arc<CompiledLinks>>,
+        map_cache: SoundMapCache,
     },
     Playback {
         request: u64,
@@ -138,6 +139,8 @@ pub struct SCModToolApp {
     subtitle_warnings: Vec<String>,
     /// UELib's analysis of the selected game, reused when switching languages.
     compiled_links: Option<Arc<CompiledLinks>>,
+    /// The selected game's shared sound maps, reused when switching languages.
+    map_cache: SoundMapCache,
 
     language_request: u64,
     scan_request: u64,
@@ -180,6 +183,7 @@ impl SCModToolApp {
             subtitles: HashMap::new(),
             subtitle_warnings: Vec::new(),
             compiled_links: None,
+            map_cache: SoundMapCache::default(),
             language_request: 0,
             scan_request: 0,
             playback_request: 0,
@@ -227,6 +231,7 @@ impl SCModToolApp {
         self.selected_language = None;
         self.clear_banks();
         self.compiled_links = None;
+        self.map_cache = SoundMapCache::default();
         self.discovering_languages = true;
         self.language_request = self.language_request.wrapping_add(1);
         let request = self.language_request;
@@ -249,8 +254,10 @@ impl SCModToolApp {
     }
 
     fn rescan(&mut self, ctx: &egui::Context) {
-        // Rescanning re-reads the game files, including its scripts.
+        // Rescanning re-reads the game files, including its scripts and
+        // shared sound maps.
         self.compiled_links = None;
+        self.map_cache = SoundMapCache::default();
         self.start_scan(ctx);
     }
 
@@ -273,6 +280,7 @@ impl SCModToolApp {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.scan_cancel = Some(Arc::clone(&cancelled));
         let mut compiled_links = self.compiled_links.clone();
+        let mut map_cache = self.map_cache.clone();
         let sender = self.sender.clone();
         let repaint = ctx.clone();
         self.set_status("Scanning sound banks...", false);
@@ -285,6 +293,7 @@ impl SCModToolApp {
             let mut result = sc_mod_tool_core::discover_banks_with_progress(
                 &root,
                 &language,
+                &mut map_cache,
                 &cancelled,
                 |completed, total, bank| {
                     send_progress(ScanProgress::Banks {
@@ -317,6 +326,7 @@ impl SCModToolApp {
                 result,
                 subtitles,
                 compiled_links,
+                map_cache,
             });
             repaint.request_repaint();
         });
@@ -552,11 +562,13 @@ impl SCModToolApp {
                     result,
                     subtitles,
                     compiled_links,
+                    map_cache,
                 } => {
                     if request != self.scan_request {
                         continue;
                     }
                     self.compiled_links = compiled_links;
+                    self.map_cache = map_cache;
                     self.scan_cancel = None;
                     self.scan_progress = None;
                     match result {

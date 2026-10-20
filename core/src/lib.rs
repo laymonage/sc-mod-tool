@@ -6,7 +6,9 @@ mod sounds_folder;
 pub mod subtitles;
 mod vgmstream;
 
-pub use banks::{SoundKind, discover_banks, discover_banks_with_progress, discover_languages};
+pub use banks::{
+    SoundKind, SoundMapCache, discover_banks, discover_banks_with_progress, discover_languages,
+};
 pub use error::Error;
 
 use std::fs;

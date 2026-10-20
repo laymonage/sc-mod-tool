@@ -35,6 +35,13 @@ pub(crate) fn map_files(sounds: &Path, map: Option<&str>, language_folder: &str)
         .collect()
 }
 
+/// Whether the map at `path` is a language's own `MAPS.LM0`, rather than one
+/// every language shares.
+pub(crate) fn is_localized(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("LM0"))
+}
+
 /// What a bank of map sounds holds, in the order banks are listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SoundKind {
@@ -71,9 +78,7 @@ pub(crate) fn read_map_banks(
     map: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Vec<Bank>, Error> {
-    let is_localized = path
-        .rsplit_once('.')
-        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("LM0"));
+    let is_localized = is_localized(path);
     let name = path.rsplit('/').next().unwrap_or(path).to_owned();
     let size = std::fs::metadata(sounds.join(path)).map_or(0, |metadata| metadata.len());
     let unreadable = |issue: String| Bank {
