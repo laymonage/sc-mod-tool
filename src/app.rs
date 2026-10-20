@@ -11,11 +11,10 @@ use std::time::Duration;
 use eframe::egui;
 use sc_mod_tool_core::{
     Bank, Error, GameCache, Language, Segment,
-    decoder::DecodedAudio,
     subtitles::{Subtitle, SubtitleAnalysis},
 };
 
-use crate::audio::{ActivePlayback, AudioOutput};
+use crate::audio::{ActivePlayback, AudioOutput, PlayableAudio};
 
 enum WorkerMessage {
     Languages {
@@ -34,7 +33,7 @@ enum WorkerMessage {
     Playback {
         request: u64,
         segment_id: String,
-        result: Result<DecodedAudio, Error>,
+        result: Result<PlayableAudio, Error>,
     },
 }
 
@@ -474,7 +473,8 @@ impl SCModToolApp {
         let repaint = ctx.clone();
 
         thread::spawn(move || {
-            let result = sc_mod_tool_core::decode_segment(&root, &bank_path, &segment, &cancelled);
+            let result = sc_mod_tool_core::decode_segment(&root, &bank_path, &segment, &cancelled)
+                .and_then(|audio| PlayableAudio::new(audio).map_err(Error::from));
             let _ = sender.send(WorkerMessage::Playback {
                 request,
                 segment_id,
@@ -503,7 +503,7 @@ impl SCModToolApp {
         self.cancel_pending_playback();
         self.seek_drag = None;
         if let Some(playback) = self.active_playback.take() {
-            playback.sink.stop();
+            playback.player.stop();
         }
     }
 
@@ -671,7 +671,7 @@ impl eframe::App for SCModToolApp {
         if self
             .active_playback
             .as_ref()
-            .is_some_and(|playback| !playback.stopped && playback.sink.empty())
+            .is_some_and(|playback| !playback.stopped && playback.player.empty())
         {
             self.stop_playback();
         }
@@ -679,7 +679,7 @@ impl eframe::App for SCModToolApp {
         let is_playing = self
             .active_playback
             .as_ref()
-            .is_some_and(|playback| !playback.stopped && !playback.sink.is_paused());
+            .is_some_and(|playback| !playback.stopped && !playback.player.is_paused());
 
         // Keep repainting while work is in progress, so finished playback is
         // noticed without waiting for input.

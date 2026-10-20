@@ -305,7 +305,7 @@ impl SCModToolApp {
         } else if response.drag_stopped() || response.changed() {
             actions.push(Action::Seek(Duration::from_secs_f32(position)));
         }
-        let pause_icon = if playback.sink.is_paused() {
+        let pause_icon = if playback.player.is_paused() {
             ICON_PLAY_ARROW
         } else {
             ICON_PAUSE
@@ -642,7 +642,7 @@ impl SCModToolApp {
 
                         // Segment actions. Export and replace will go here.
                         let is_playing = self.active_playback.as_ref().is_some_and(|playback| {
-                            playback.segment_id == segment.id && !playback.sink.is_paused()
+                            playback.segment_id == segment.id && !playback.player.is_paused()
                         });
                         let (icon, label) = if is_playing {
                             (ICON_PAUSE, "Pause")
