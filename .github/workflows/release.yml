@@ -67,7 +67,10 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
-          path: dist/*.*
+          # Only the archives, not the folders they were made from.
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
           if-no-files-found: error
 
   release:
