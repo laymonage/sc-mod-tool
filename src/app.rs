@@ -517,7 +517,7 @@ impl SCModToolApp {
     fn seek(&mut self, position: Duration) {
         self.seek_drag = None;
         if let Some(playback) = &mut self.active_playback
-            && let Err(error) = playback.seek(position)
+            && let Err(error) = self.audio.seek(playback, position)
         {
             self.set_status(format!("Could not seek: {error}"), true);
         }

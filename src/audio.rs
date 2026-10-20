@@ -12,21 +12,17 @@ pub struct ActivePlayback {
     /// Whether playback has stopped, at the end or by the user, leaving the
     /// segment loaded at its start.
     pub stopped: bool,
-    /// Kept to load the segment again once it has stopped.
+    /// Where in the segment the sink's audio starts, after a seek.
+    start: Duration,
+    /// Kept to load the segment again once it has stopped, or from where it
+    /// was sought.
     audio: DecodedAudio,
 }
 
 impl ActivePlayback {
     /// How far playback has got, never past the end.
     pub fn position(&self) -> Duration {
-        self.sink.get_pos().min(self.duration)
-    }
-
-    pub fn seek(&mut self, position: Duration) -> Result<(), String> {
-        self.stopped = false;
-        self.sink
-            .try_seek(position.min(self.duration))
-            .map_err(|error| error.to_string())
+        (self.start + self.sink.get_pos()).min(self.duration)
     }
 
     pub fn toggle_pause(&mut self) {
@@ -60,7 +56,7 @@ impl AudioOutput {
         audio: DecodedAudio,
         segment_id: String,
     ) -> Result<ActivePlayback, String> {
-        let sink = self.load(&audio)?;
+        let sink = self.load(&audio, Duration::ZERO)?;
         sink.play();
         let frames = audio.samples.len() / usize::from(audio.channels.max(1));
         let duration = Duration::from_secs_f64(frames as f64 / f64::from(audio.sample_rate.max(1)));
@@ -69,6 +65,7 @@ impl AudioOutput {
             segment_id,
             duration,
             stopped: false,
+            start: Duration::ZERO,
             audio,
         })
     }
@@ -77,13 +74,36 @@ impl AudioOutput {
     /// played again. Rodio can't rewind a sound that has ended, so the segment
     /// is loaded again.
     pub fn stop(&mut self, playback: &mut ActivePlayback) -> Result<(), String> {
-        playback.sink = self.load(&playback.audio)?;
+        playback.sink = self.load(&playback.audio, Duration::ZERO)?;
+        playback.start = Duration::ZERO;
         playback.stopped = true;
         Ok(())
     }
 
-    /// A paused sink with the audio queued at its start.
-    fn load(&mut self, audio: &DecodedAudio) -> Result<Sink, String> {
+    /// Moves playback to `position`, leaving it paused or playing as it was.
+    ///
+    /// The segment is loaded again from there instead of seeking the sink.
+    /// Rodio's seek waits for the output stream to take it, and a stream
+    /// whose device has gone away never does, which would freeze the app.
+    /// Loading again also moves playback to a new default device.
+    pub fn seek(
+        &mut self,
+        playback: &mut ActivePlayback,
+        position: Duration,
+    ) -> Result<(), String> {
+        let position = position.min(playback.duration);
+        let paused = playback.sink.is_paused();
+        playback.sink = self.load(&playback.audio, position)?;
+        playback.start = position;
+        playback.stopped = false;
+        if !paused {
+            playback.sink.play();
+        }
+        Ok(())
+    }
+
+    /// A paused sink with the audio queued from `start`.
+    fn load(&mut self, audio: &DecodedAudio, start: Duration) -> Result<Sink, String> {
         let device_name = cpal::default_host()
             .default_output_device()
             .and_then(|device| device.name().ok());
@@ -103,10 +123,13 @@ impl AudioOutput {
         };
         let sink = Sink::try_new(&stream.handle).map_err(|error| error.to_string())?;
         sink.pause();
+        let channels = usize::from(audio.channels.max(1));
+        let frame = (start.as_secs_f64() * f64::from(audio.sample_rate)) as usize;
+        let first = frame.saturating_mul(channels).min(audio.samples.len());
         sink.append(SamplesBuffer::new(
             audio.channels,
             audio.sample_rate,
-            audio.samples.clone(),
+            audio.samples[first..].to_vec(),
         ));
         Ok(sink)
     }
