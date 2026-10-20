@@ -232,7 +232,7 @@ impl SCModToolApp {
         let request = self.language_request;
         let sender = self.sender.clone();
         let repaint = ctx.clone();
-        self.set_status("Looking for sound banks...", false);
+        self.set_status("Looking for sound banks…", false);
 
         thread::spawn(move || {
             let result = sc_mod_tool_core::discover_languages(&root);
@@ -277,7 +277,7 @@ impl SCModToolApp {
         let game_cache = Arc::clone(&self.game_cache);
         let sender = self.sender.clone();
         let repaint = ctx.clone();
-        self.set_status("Scanning sound banks...", false);
+        self.set_status("Scanning sound banks…", false);
 
         thread::spawn(move || {
             // A cancelled scan may still be using the cache, until UELib
@@ -342,6 +342,9 @@ impl SCModToolApp {
 
     /// What the scan in progress is doing, to show the user.
     fn scan_activity(&self) -> &'static str {
+        if self.discovering_languages {
+            return "Looking for sound banks…";
+        }
         let reading_scripts = matches!(
             self.scan_progress,
             Some(ScanProgress::Subtitles {

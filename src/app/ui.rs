@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use eframe::egui::{self, Align, Align2, CursorIcon, Key, Layout, Modifiers, RichText, Sense};
+use eframe::egui::{
+    self, Align, Align2, CursorIcon, Key, Layout, Modifiers, Response, RichText, Role, Sense,
+    WidgetInfo,
+};
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
     ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW,
@@ -300,17 +303,19 @@ impl SCModToolApp {
         let response = ui
             .add(egui::Slider::new(&mut position, 0.0..=total).show_value(false))
             .on_hover_and_drag_cursor(CursorIcon::PointingHand);
+        // The slider has no visible label, so it's named for screen readers.
+        response.widget_info(|| WidgetInfo::slider(true, f64::from(position), "Seek"));
         if response.dragged() {
             actions.push(Action::DragSeek(Some(position)));
         } else if response.drag_stopped() || response.changed() {
             actions.push(Action::Seek(Duration::from_secs_f32(position)));
         }
-        let pause_icon = if playback.player.is_paused() {
-            ICON_PLAY_ARROW
+        let (pause_icon, name) = if playback.player.is_paused() {
+            (ICON_PLAY_ARROW, "Play")
         } else {
-            ICON_PAUSE
+            (ICON_PAUSE, "Pause")
         };
-        if ui.button(pause_icon.codepoint).clicked() {
+        if name_icon_button(ui.button(pause_icon.codepoint), name).clicked() {
             actions.push(Action::TogglePause);
         }
     }
@@ -538,18 +543,15 @@ impl SCModToolApp {
                     row.set_selected(self.selected_segment == Some(index));
 
                     row.col(|ui| {
-                        let (icon, hint) = if is_playing {
+                        let (icon, name) = if is_playing {
                             (ICON_STOP, "Stop")
                         } else {
                             (ICON_PLAY_ARROW, "Play")
                         };
                         // Fill the cell, to centre the icon in it.
                         ui.centered_and_justified(|ui| {
-                            if ui
-                                .add(egui::Button::new(icon.codepoint).frame(false))
-                                .on_hover_text(hint)
-                                .clicked()
-                            {
+                            let button = ui.add(egui::Button::new(icon.codepoint).frame(false));
+                            if name_icon_button(button, name).clicked() {
                                 actions.push(Action::TogglePlayback(index));
                             }
                         });
@@ -649,12 +651,13 @@ impl SCModToolApp {
                         } else {
                             (ICON_PLAY_ARROW, "Play")
                         };
-                        let label = format!("{}  {label}", icon.codepoint);
-                        if ui
-                            .add(egui::Button::new(label).min_size(egui::vec2(96.0, 28.0)))
-                            .on_hover_text("Space")
-                            .clicked()
-                        {
+                        let button = ui.add(
+                            egui::Button::new(format!("{}  {label}", icon.codepoint))
+                                .min_size(egui::vec2(96.0, 28.0)),
+                        );
+                        // Named without its icon, which screen readers can't read.
+                        button.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
+                        if button.on_hover_text("Space").clicked() {
                             actions.push(Action::PlayOrPause(index));
                         }
 
@@ -1158,11 +1161,21 @@ fn bank_title(bank: &Bank) -> String {
 
 fn format_duration(segment: &Segment) -> String {
     let seconds = f64::from(segment.sample_count) / f64::from(segment.sample_rate.max(1));
-    if seconds < 60.0 {
-        format!("{seconds:.1} s")
+    // Rounded to tenths before the minutes are split off, so 119.96 s is
+    // 2:00.0, not 1:60.0.
+    let tenths = (seconds * 10.0).round() as u64;
+    if tenths < 600 {
+        format!("{}.{} s", tenths / 10, tenths % 10)
     } else {
-        format!("{}:{:04.1}", (seconds / 60.0).floor(), seconds % 60.0)
+        format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
     }
+}
+
+/// Names an icon-only button for screen readers, which would otherwise read
+/// its icon's private-use character, and shows the name as its tooltip.
+fn name_icon_button(button: Response, name: &str) -> Response {
+    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, name));
+    button.on_hover_text(name)
 }
 
 fn format_channels(channels: u32) -> String {
@@ -1186,5 +1199,37 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KB", bytes / KIB)
     } else {
         format!("{:.1} MB", bytes / (KIB * KIB))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn segment(sample_count: u32, sample_rate: u32) -> Segment {
+        Segment {
+            id: String::new(),
+            source: SegmentSource::Stream {
+                offset: 0,
+                byte_length: 0,
+            },
+            name: None,
+            sample_count,
+            sample_rate,
+            channels: 1,
+            codec: String::new(),
+            segment: 0,
+        }
+    }
+
+    #[test]
+    fn rounds_durations_before_splitting_off_minutes() {
+        let duration = |milliseconds| format_duration(&segment(milliseconds, 1000));
+        assert_eq!(duration(5_830), "5.8 s");
+        assert_eq!(duration(59_940), "59.9 s");
+        assert_eq!(duration(59_960), "1:00.0");
+        assert_eq!(duration(119_960), "2:00.0");
+        assert_eq!(duration(125_040), "2:05.0");
+        assert_eq!(duration(3_599_960), "60:00.0");
     }
 }
