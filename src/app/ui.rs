@@ -620,14 +620,16 @@ impl SCModToolApp {
             .default_size(320.0)
             .size_range(240.0..=520.0)
             .show(ui, |ui| {
-                let (Some(bank), Some(segment)) = (self.selected_bank(), self.selected_segment())
-                else {
+                let (Some(bank), Some(row), Some(segment)) = (
+                    self.selected_bank(),
+                    self.selected_segment,
+                    self.selected_segment(),
+                ) else {
                     ui.centered_and_justified(|ui| {
                         ui.label(RichText::new("Select a segment to see its details.").weak());
                     });
                     return;
                 };
-                let index = segment.segment;
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -638,7 +640,9 @@ impl SCModToolApp {
                         } else {
                             "Segment"
                         };
-                        ui.label(RichText::new(format!("{noun} {}", index + 1)).heading());
+                        ui.label(
+                            RichText::new(format!("{noun} {}", segment.segment + 1)).heading(),
+                        );
                         ui.label(RichText::new(bank_title(bank)).weak());
                         ui.add_space(8.0);
 
@@ -658,7 +662,7 @@ impl SCModToolApp {
                         // Named without its icon, which screen readers can't read.
                         button.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
                         if button.on_hover_text("Space").clicked() {
-                            actions.push(Action::PlayOrPause(index));
+                            actions.push(Action::PlayOrPause(row));
                         }
 
                         ui.add_space(8.0);
