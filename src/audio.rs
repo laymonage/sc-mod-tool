@@ -1,8 +1,12 @@
 use std::num::NonZero;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source, buffer::SamplesBuffer, cpal};
+use rodio::{
+    CpalErrorKind, DeviceSinkBuilder, MixerDeviceSink, Player, Source, buffer::SamplesBuffer, cpal,
+};
 use sc_mod_tool_core::decoder::DecodedAudio;
 
 /// A decoded segment, ready to play.
@@ -69,6 +73,10 @@ struct OpenSink {
     /// The default output device when the sink was opened, so it can be
     /// opened again if the user switches devices.
     device_id: Option<cpal::DeviceId>,
+    /// Set when the sink reports that it stopped working, such as when its
+    /// device was disconnected, so it's opened again for the next segment
+    /// even if the device comes back under the same ID.
+    failed: Arc<AtomicBool>,
     sink: MixerDeviceSink,
 }
 
@@ -127,18 +135,48 @@ impl AudioOutput {
         let device = cpal::default_host().default_output_device();
         let device_id = device.as_ref().and_then(|device| device.id().ok());
         let sink = match &self.sink {
-            Some(open) if open.device_id == device_id => &open.sink,
+            Some(open) if open.device_id == device_id && !open.failed.load(Ordering::Relaxed) => {
+                &open.sink
+            }
             _ => {
                 // Close the old output before opening the new device.
                 self.sink = None;
                 let device = device.ok_or("No audio output device was found.")?;
+                let failed = Arc::new(AtomicBool::new(false));
+                let on_error = {
+                    let failed = Arc::clone(&failed);
+                    move |error: cpal::Error| {
+                        // These leave the output working: it followed a new
+                        // default device, or briefly fell behind. Opening it
+                        // again is cheap, so anything else counts as failed.
+                        if !matches!(
+                            error.kind(),
+                            CpalErrorKind::DeviceChanged
+                                | CpalErrorKind::Xrun
+                                | CpalErrorKind::RealtimeDenied
+                        ) {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+                    }
+                };
                 let mut sink = DeviceSinkBuilder::from_device(device)
-                    .and_then(|builder| builder.open_sink_or_fallback())
+                    .and_then(|builder| {
+                        builder
+                            .with_error_callback(on_error)
+                            .open_sink_or_fallback()
+                    })
                     .map_err(|error| error.to_string())?;
                 // The output is replaced whenever the device changes, which
                 // rodio would otherwise report on stderr.
                 sink.log_on_drop(false);
-                &self.sink.insert(OpenSink { device_id, sink }).sink
+                &self
+                    .sink
+                    .insert(OpenSink {
+                        device_id,
+                        failed,
+                        sink,
+                    })
+                    .sink
             }
         };
         let player = Player::connect_new(sink.mixer());
