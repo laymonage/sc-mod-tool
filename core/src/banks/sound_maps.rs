@@ -37,7 +37,7 @@ pub(crate) fn map_files(sounds: &Path, map: Option<&str>, language_folder: &str)
 
 /// Whether the map at `path` is a language's own `MAPS.LM0`, rather than one
 /// every language shares.
-pub(crate) fn is_localized(path: &str) -> bool {
+fn is_localized(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("LM0"))
 }

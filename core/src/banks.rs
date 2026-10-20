@@ -73,8 +73,8 @@ pub fn discover_banks(root: &Path, language: &str) -> Result<Vec<Bank>, Error> {
     )
 }
 
-/// Finds `language`'s banks, reading the shared sound maps' from `cache` when
-/// it has them, and adding them when it doesn't.
+/// Finds `language`'s banks, reading its sound maps' from `cache` when it has
+/// them, and adding them when it doesn't.
 pub fn discover_banks_with_progress(
     root: &Path,
     language: &str,
@@ -138,9 +138,7 @@ pub fn discover_banks_with_progress(
                     Some(cached) => cached.to_vec(),
                     None => {
                         let read = sound_maps::read_map_banks(&sounds, &path, map, cancelled)?;
-                        if !sound_maps::is_localized(&path) {
-                            cache.map_banks.insert(path.clone(), read.as_slice().into());
-                        }
+                        cache.map_banks.insert(path.clone(), read.as_slice().into());
                         read
                     }
                 };
@@ -210,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn reuses_the_shared_sound_maps_banks_but_not_the_languages() {
+    fn reuses_the_sound_maps_banks_it_has_read() {
         let game = tempfile::tempdir().unwrap();
         let sounds = game.path().join("Sounds");
         for language in ["ENGLISH", "GERMAN"] {
@@ -237,9 +235,10 @@ mod tests {
 
         scan("ENGLISH", &mut cache);
         fs::write(sounds.join("MAPS.SM0"), [0; 128]).unwrap();
+        fs::write(sounds.join("ENGLISH/MAPS.LM0"), [0; 48]).unwrap();
         fs::write(sounds.join("GERMAN/MAPS.LM0"), [0; 48]).unwrap();
-        // The shared map comes from the cache, and the language's own map
-        // is read again.
+        // The shared map comes from the cache, and German's own map is read
+        // for the first time.
         assert_eq!(
             map_sizes(&scan("GERMAN", &mut cache)),
             [
@@ -247,10 +246,18 @@ mod tests {
                 ("MAPS.SM0".to_owned(), 64),
             ]
         );
+        // Going back to English reads its map from the cache too.
         assert_eq!(
-            map_sizes(&scan("GERMAN", &mut GameCache::default())),
+            map_sizes(&scan("ENGLISH", &mut cache)),
             [
-                ("GERMAN/MAPS.LM0".to_owned(), 48),
+                ("ENGLISH/MAPS.LM0".to_owned(), 32),
+                ("MAPS.SM0".to_owned(), 64),
+            ]
+        );
+        assert_eq!(
+            map_sizes(&scan("ENGLISH", &mut GameCache::default())),
+            [
+                ("ENGLISH/MAPS.LM0".to_owned(), 48),
                 ("MAPS.SM0".to_owned(), 128),
             ]
         );

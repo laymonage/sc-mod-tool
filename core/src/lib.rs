@@ -19,15 +19,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use decoder::DecodedAudio;
 use sounds_folder::{find_sounds_directory, safe_child_path};
 
-/// What scanning a game reads that's the same for every language: the banks of
-/// the sound maps every language shares, and UELib's analysis of the game's
-/// scripts. They take most of a scan, so callers can keep one cache between
-/// scans of a game's languages, and start a new one for another game or to
-/// read its files again.
+/// What scanning a game reads that's slow to read again: the banks of its
+/// sound maps, and UELib's analysis of its scripts. They take most of a scan,
+/// so callers can keep one cache between scans of a game's languages, and
+/// start a new one for another game or to read its files again.
 #[derive(Clone, Debug, Default)]
 pub struct GameCache {
-    /// The banks read from `MAPS.SM0` and each extra map's own, by the map's
-    /// path relative to `Sounds`.
+    /// The banks read from each sound map, such as `MAPS.SM0` or a
+    /// language's `MAPS.LM0`, by the map's path relative to `Sounds`.
     pub(crate) map_banks: HashMap<String, Arc<[Bank]>>,
     pub(crate) compiled_links: Option<Arc<subtitles::CompiledLinks>>,
 }
