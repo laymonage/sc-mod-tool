@@ -115,11 +115,26 @@ fn build_uelib_bridge(manifest_dir: &Path) {
         );
     }
 
-    let project = manifest_dir.join("uelib-bridge/UELibBridge.csproj");
+    // Each source file is watched on its own, because watching the folder
+    // would also watch `bin` and `obj`, which every build writes to.
+    let bridge_directory = manifest_dir.join("uelib-bridge");
+    let project = bridge_directory.join("UELibBridge.csproj");
     println!("cargo:rerun-if-changed={}", project.display());
-    for source in ["Exports.cs", "DirectPairs.cs", "SoundData.cs"] {
-        let source = manifest_dir.join("uelib-bridge").join(source);
-        println!("cargo:rerun-if-changed={}", source.display());
+    let entries = fs::read_dir(&bridge_directory).unwrap_or_else(|error| {
+        panic!("Could not read {}: {error}", bridge_directory.display());
+    });
+    for entry in entries {
+        let source = entry
+            .unwrap_or_else(|error| {
+                panic!("Could not read {}: {error}", bridge_directory.display())
+            })
+            .path();
+        if source
+            .extension()
+            .is_some_and(|extension| extension == "cs")
+        {
+            println!("cargo:rerun-if-changed={}", source.display());
+        }
     }
 
     let status = Command::new("dotnet")
