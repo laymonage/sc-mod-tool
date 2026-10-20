@@ -264,6 +264,25 @@ mod tests {
     }
 
     #[test]
+    fn reads_only_ls0_banks_directly_in_the_language_folder() {
+        let game = tempfile::tempdir().unwrap();
+        let english = game.path().join("Sounds/ENGLISH");
+        fs::create_dir_all(english.join("backup")).unwrap();
+        for name in ["1_1.LS0", "1_2.ls0", "1_3", "1_4.LS0.bak", "backup/1_1.LS0"] {
+            fs::write(english.join(name), make_segment()).unwrap();
+        }
+
+        let banks = discover_banks(game.path(), "ENGLISH").unwrap();
+        assert_eq!(
+            banks
+                .iter()
+                .map(|bank| bank.path.as_str())
+                .collect::<Vec<_>>(),
+            ["ENGLISH/1_1.LS0", "ENGLISH/1_2.ls0"]
+        );
+    }
+
+    #[test]
     fn discovers_languages_and_banks_from_selected_game_directory() {
         let game = tempfile::tempdir().unwrap();
         let english = game.path().join("Sounds/ENGLISH");

@@ -13,6 +13,9 @@ const BANK_HEADER_SIZE: usize = 0x30;
 const FRAME_HEADER_SIZE: usize = 0x34;
 const CODES_PER_FRAME: u32 = 1536;
 
+/// Finds the numeric `.LS0` banks in a language folder. Subfolders aren't
+/// searched: the game has none there, and a copy of a bank in one, such as a
+/// backup, would make the map's references to that bank ambiguous.
 pub(super) fn collect_banks(
     directory: &Path,
     relative_directory: &Path,
@@ -23,18 +26,18 @@ pub(super) fn collect_banks(
             .file_type()
             .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?;
         let name = entry.file_name();
-        let relative_path = relative_directory.join(&name);
-        if file_type.is_dir() {
-            collect_banks(&entry.path(), &relative_path, output)?;
-        } else if file_type.is_file() && is_supported_bank_name(&name.to_string_lossy()) {
-            output.push((entry.path(), relative_path));
+        if file_type.is_file() && is_supported_bank_name(&name.to_string_lossy()) {
+            output.push((entry.path(), relative_directory.join(&name)));
         }
     }
     Ok(())
 }
 
+/// Whether `file_name` is a numeric bank, such as `1_1_0.LS0`.
 pub(super) fn is_supported_bank_name(file_name: &str) -> bool {
-    mission_code(file_name).is_some()
+    file_name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        extension.eq_ignore_ascii_case("LS0") && mission_code(stem).is_some()
+    })
 }
 
 /// Scans the `.LS0` bank at `absolute_path` for streams.
