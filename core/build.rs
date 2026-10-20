@@ -26,10 +26,12 @@ fn main() {
         .include(&vgmstream_source)
         .include(vgmstream_source.join("coding"))
         .include(vgmstream_source.join("../ext_includes"));
+    // GNU C11 rather than strict C11, which makes glibc hide POSIX and math
+    // names such as `M_PI` that vgmstream uses.
     if is_msvc {
         build.flag("/std:c11");
     } else {
-        build.flag("-std=c11");
+        build.flag("-std=gnu11");
     }
     build.compile("sc1_vgmstream_adapter");
 
@@ -50,7 +52,7 @@ fn main() {
             .define("_WIN32_WINNT", "0x501")
             .define("_CRT_SECURE_NO_WARNINGS", None);
     } else {
-        vgmstream.flag("-std=c11").flag("-w");
+        vgmstream.flag("-std=gnu11").flag("-w");
     }
     vgmstream.compile("vgmstream");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

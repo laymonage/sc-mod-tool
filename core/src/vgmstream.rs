@@ -243,7 +243,8 @@ fn c_string(characters: &[c_char]) -> String {
     let bytes: Vec<u8> = characters
         .iter()
         .take_while(|character| **character != 0)
-        .map(|character| *character as u8)
+        // `c_char` is `i8` on some targets and `u8` on others.
+        .map(|character| u8::from_ne_bytes(character.to_ne_bytes()))
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
