@@ -243,7 +243,8 @@ impl SCModToolApp {
     }
 
     fn select_language(&mut self, ctx: &egui::Context, language: String) {
-        if self.selected_language.as_deref() != Some(&language) {
+        let nothing_loaded = self.banks.is_empty() && self.scan_progress.is_none();
+        if self.selected_language.as_deref() != Some(&language) || nothing_loaded {
             self.selected_language = Some(language);
             self.start_scan(ctx);
         }
