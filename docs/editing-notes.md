@@ -76,3 +76,18 @@ Each area has its own events, so this only changes Training.
    sounds out to separate files.
 4. **The app.** An "Export" and "Replace" action for each segment. The
    inspector already reserves a place for them.
+
+## What the app keeps while it runs
+
+Two things in the app assume the game's files don't change while it's open,
+and editing will break both:
+
+- **The game cache.** `GameCache` keeps the banks read from each sound map
+  and UELib's analysis of the scripts, so switching languages doesn't read
+  them again. Only Rescan or opening another game folder clears it. Saving a
+  map, a bank or a script package has to clear it too, or the app keeps
+  showing what was there before.
+- **Mapped files.** While a scan lists a map's sounds, the map is mapped into
+  memory. Truncating it then would crash the app, and Windows won't let a
+  mapped file be replaced. A save shouldn't run during a scan, and writing to
+  a new file and renaming it over the old one is safer than writing in place.
