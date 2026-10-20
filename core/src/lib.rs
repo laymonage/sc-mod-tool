@@ -6,18 +6,39 @@ mod sounds_folder;
 pub mod subtitles;
 mod vgmstream;
 
-pub use banks::{
-    SoundKind, SoundMapCache, discover_banks, discover_banks_with_progress, discover_languages,
-};
+pub use banks::{SoundKind, discover_banks, discover_banks_with_progress, discover_languages};
 pub use error::Error;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use decoder::DecodedAudio;
 use sounds_folder::{find_sounds_directory, safe_child_path};
+
+/// What scanning a game reads that's the same for every language: the banks of
+/// the sound maps every language shares, and UELib's analysis of the game's
+/// scripts. They take most of a scan, so callers can keep one cache between
+/// scans of a game's languages, and start a new one for another game or to
+/// read its files again.
+#[derive(Clone, Debug, Default)]
+pub struct GameCache {
+    /// The banks read from `MAPS.SM0` and each extra map's own, by the map's
+    /// path relative to `Sounds`.
+    pub(crate) map_banks: HashMap<String, Arc<[Bank]>>,
+    pub(crate) compiled_links: Option<Arc<subtitles::CompiledLinks>>,
+}
+
+impl GameCache {
+    /// Whether UELib has read the game's scripts, which is the slow part of
+    /// loading subtitles the first time.
+    pub fn has_read_scripts(&self) -> bool {
+        self.compiled_links.is_some()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Language {

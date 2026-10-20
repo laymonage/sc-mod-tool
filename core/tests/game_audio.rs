@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use sc_mod_tool_core::{
-    SoundMapCache, decode_segment, discover_banks_with_progress, discover_languages,
+    GameCache, decode_segment, discover_banks_with_progress, discover_languages,
     subtitles::{MappingConfidence, load_verified_subtitles},
 };
 
@@ -26,10 +26,9 @@ fn decodes_every_discovered_game_segment() {
     let languages = discover_languages(&game_root)
         .unwrap_or_else(|error| panic!("Could not discover game languages: {error}"));
     let cancelled = AtomicBool::new(false);
-    let mut compiled_links = None;
     // Like the app, languages after the first read the shared sound maps'
-    // banks from the cache.
-    let mut map_cache = SoundMapCache::default();
+    // banks and UELib's analysis from the cache.
+    let mut cache = GameCache::default();
     let mut total_banks = 0;
     let mut total_segments = 0;
     let mut map_languages = HashMap::new();
@@ -38,7 +37,7 @@ fn decodes_every_discovered_game_segment() {
         let banks = discover_banks_with_progress(
             &game_root,
             &language.directory,
-            &mut map_cache,
+            &mut cache,
             &cancelled,
             |_, _, _| {},
         )
@@ -47,7 +46,7 @@ fn decodes_every_discovered_game_segment() {
             &game_root,
             &language.directory,
             &banks,
-            &mut compiled_links,
+            &mut cache,
             &cancelled,
         )
         .unwrap_or_else(|error| panic!("Could not load {} subtitles: {error}", language.label));

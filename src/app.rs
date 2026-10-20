@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use eframe::egui;
 use sc_mod_tool_core::{
-    Bank, Error, Language, Segment, SoundMapCache,
+    Bank, Error, GameCache, Language, Segment,
     decoder::DecodedAudio,
-    subtitles::{CompiledLinks, Subtitle, SubtitleAnalysis},
+    subtitles::{Subtitle, SubtitleAnalysis},
 };
 
 use crate::audio::{ActivePlayback, AudioOutput};
@@ -30,8 +30,7 @@ enum WorkerMessage {
         request: u64,
         result: Result<Vec<Bank>, Error>,
         subtitles: Result<SubtitleAnalysis, Error>,
-        compiled_links: Option<Arc<CompiledLinks>>,
-        map_cache: SoundMapCache,
+        game_cache: GameCache,
     },
     Playback {
         request: u64,
@@ -137,10 +136,8 @@ pub struct SCModToolApp {
     selected_segment: Option<usize>,
     subtitles: HashMap<String, Vec<Subtitle>>,
     subtitle_warnings: Vec<String>,
-    /// UELib's analysis of the selected game, reused when switching languages.
-    compiled_links: Option<Arc<CompiledLinks>>,
-    /// The selected game's shared sound maps, reused when switching languages.
-    map_cache: SoundMapCache,
+    /// What scans of the selected game reuse when switching languages.
+    game_cache: GameCache,
 
     language_request: u64,
     scan_request: u64,
@@ -182,8 +179,7 @@ impl SCModToolApp {
             selected_segment: None,
             subtitles: HashMap::new(),
             subtitle_warnings: Vec::new(),
-            compiled_links: None,
-            map_cache: SoundMapCache::default(),
+            game_cache: GameCache::default(),
             language_request: 0,
             scan_request: 0,
             playback_request: 0,
@@ -230,8 +226,7 @@ impl SCModToolApp {
         self.languages.clear();
         self.selected_language = None;
         self.clear_banks();
-        self.compiled_links = None;
-        self.map_cache = SoundMapCache::default();
+        self.game_cache = GameCache::default();
         self.discovering_languages = true;
         self.language_request = self.language_request.wrapping_add(1);
         let request = self.language_request;
@@ -256,8 +251,7 @@ impl SCModToolApp {
     fn rescan(&mut self, ctx: &egui::Context) {
         // Rescanning re-reads the game files, including its scripts and
         // shared sound maps.
-        self.compiled_links = None;
-        self.map_cache = SoundMapCache::default();
+        self.game_cache = GameCache::default();
         self.start_scan(ctx);
     }
 
@@ -279,8 +273,7 @@ impl SCModToolApp {
         let request = self.scan_request;
         let cancelled = Arc::new(AtomicBool::new(false));
         self.scan_cancel = Some(Arc::clone(&cancelled));
-        let mut compiled_links = self.compiled_links.clone();
-        let mut map_cache = self.map_cache.clone();
+        let mut game_cache = self.game_cache.clone();
         let sender = self.sender.clone();
         let repaint = ctx.clone();
         self.set_status("Scanning sound banks...", false);
@@ -293,7 +286,7 @@ impl SCModToolApp {
             let mut result = sc_mod_tool_core::discover_banks_with_progress(
                 &root,
                 &language,
-                &mut map_cache,
+                &mut game_cache,
                 &cancelled,
                 |completed, total, bank| {
                     send_progress(ScanProgress::Banks {
@@ -305,13 +298,13 @@ impl SCModToolApp {
             );
             let subtitles = if let Ok(banks) = &result {
                 send_progress(ScanProgress::Subtitles {
-                    reading_scripts: compiled_links.is_none(),
+                    reading_scripts: !game_cache.has_read_scripts(),
                 });
                 sc_mod_tool_core::subtitles::load_verified_subtitles(
                     &root,
                     &language,
                     banks,
-                    &mut compiled_links,
+                    &mut game_cache,
                     &cancelled,
                 )
             } else {
@@ -325,8 +318,7 @@ impl SCModToolApp {
                 request,
                 result,
                 subtitles,
-                compiled_links,
-                map_cache,
+                game_cache,
             });
             repaint.request_repaint();
         });
@@ -561,14 +553,12 @@ impl SCModToolApp {
                     request,
                     result,
                     subtitles,
-                    compiled_links,
-                    map_cache,
+                    game_cache,
                 } => {
                     if request != self.scan_request {
                         continue;
                     }
-                    self.compiled_links = compiled_links;
-                    self.map_cache = map_cache;
+                    self.game_cache = game_cache;
                     self.scan_cancel = None;
                     self.scan_progress = None;
                     match result {

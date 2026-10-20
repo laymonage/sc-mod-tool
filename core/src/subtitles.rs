@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use encoding_rs::WINDOWS_1252;
 
-use crate::Error;
 use crate::sounds_folder::{
     LanguageFolder, find_file, find_sounds_directory, known_language, map_language_folders,
     safe_child_path,
 };
+use crate::{Error, GameCache};
 use alignment::match_unshown_subtitles;
 use bridge::{BridgeLink, BridgePattern, scan_compiled_links};
 use localization::{find_cue, line_text, localization_path, localization_sections};
@@ -79,9 +79,9 @@ impl SubtitleAnalysis {
 /// The game's direct compiled `Localize`/`Sound` references, found by UELib.
 ///
 /// They are the same for every language, and finding them is the slow part of
-/// loading subtitles, so callers can keep them between languages of a game.
+/// loading subtitles, so they're kept in the [`GameCache`].
 #[derive(Debug)]
-pub struct CompiledLinks {
+pub(crate) struct CompiledLinks {
     links: Vec<BridgeLink>,
     issues: Vec<String>,
     patterns: Vec<BridgePattern>,
@@ -89,18 +89,17 @@ pub struct CompiledLinks {
 
 /// Matches `language`'s sound banks to subtitle cues.
 ///
-/// `compiled_links` caches the UELib analysis for the game at `root`. Pass
-/// `None` to run it (it is then filled in), or a value from an earlier call for
-/// the same game root to reuse it.
+/// Runs UELib's analysis of the game's scripts unless `cache` already has it,
+/// and keeps it there.
 ///
 /// Stops with [`Error::Cancelled`] once `cancelled` is set. UELib's analysis
 /// can't be interrupted, so cancelling while it runs takes effect when it
-/// finishes. Its result is still kept in `compiled_links`.
+/// finishes. Its result is still kept in `cache`.
 pub fn load_verified_subtitles(
     root: &Path,
     language: &str,
     banks: &[super::Bank],
-    compiled_links: &mut Option<Arc<CompiledLinks>>,
+    cache: &mut GameCache,
     cancelled: &AtomicBool,
 ) -> Result<SubtitleAnalysis, Error> {
     if cancelled.load(Ordering::Relaxed) {
@@ -148,11 +147,12 @@ pub fn load_verified_subtitles(
         });
     }
 
-    let bridge = match compiled_links {
+    let bridge = match &cache.compiled_links {
         Some(links) => Arc::clone(links),
         None => {
             let result = scan_compiled_links(game_root, cancelled)?;
-            compiled_links
+            cache
+                .compiled_links
                 .insert(Arc::new(CompiledLinks {
                     links: result.links,
                     issues: result.issues,
@@ -397,12 +397,12 @@ mod tests {
 
     #[test]
     fn rejects_unknown_languages_before_running_uelib() {
-        let mut compiled_links = None;
+        let mut cache = GameCache::default();
         let error = load_verified_subtitles(
             Path::new("missing-game"),
             "KLINGON",
             &[],
-            &mut compiled_links,
+            &mut cache,
             &AtomicBool::new(false),
         )
         .unwrap_err();
@@ -410,7 +410,7 @@ mod tests {
             error.to_string(),
             "Subtitle localization extension is not known for language KLINGON."
         );
-        assert!(compiled_links.is_none());
+        assert!(!cache.has_read_scripts());
     }
 
     #[test]
@@ -419,18 +419,18 @@ mod tests {
         let english = game.path().join("Sounds/ENGLISH");
         fs::create_dir_all(&english).unwrap();
         fs::write(english.join("MAPS.LM0"), []).unwrap();
-        let mut compiled_links = None;
+        let mut cache = GameCache::default();
 
         let error = load_verified_subtitles(
             game.path(),
             "ENGLISH",
             &[],
-            &mut compiled_links,
+            &mut cache,
             &AtomicBool::new(true),
         )
         .unwrap_err();
         assert_eq!(error, Error::Cancelled);
-        assert!(compiled_links.is_none());
+        assert!(!cache.has_read_scripts());
     }
 
     #[cfg(feature = "uelib-bridge")]
@@ -445,7 +445,7 @@ mod tests {
             game.path(),
             "ENGLISH",
             &[],
-            &mut None,
+            &mut GameCache::default(),
             &AtomicBool::new(false),
         )
         .unwrap_err();

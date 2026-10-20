@@ -7,16 +7,14 @@ mod sound_maps;
 
 pub use sound_maps::SoundKind;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sounds_folder::{
     LanguageFolder, find_sounds_directory, known_language, map_language_folders, read_directory,
     safe_child_path,
 };
-use crate::{Bank, Error, Language};
+use crate::{Bank, Error, GameCache, Language};
 use ls0::{collect_banks, read_bank};
 use missions::{leading_mission_code, mission_name, mission_names};
 
@@ -64,33 +62,23 @@ pub fn discover_languages(root: &Path) -> Result<Vec<Language>, Error> {
     Ok(languages)
 }
 
-/// The banks read from the sound maps every language shares: `MAPS.SM0` and
-/// each extra map's own. Reading them takes most of a scan, so callers can
-/// keep them between languages of a game, as with
-/// [`CompiledLinks`](crate::subtitles::CompiledLinks).
-#[derive(Clone, Debug, Default)]
-pub struct SoundMapCache {
-    /// By the map's path relative to `Sounds`, such as `MAPS.SM0`.
-    banks: HashMap<String, Arc<[Bank]>>,
-}
-
 pub fn discover_banks(root: &Path, language: &str) -> Result<Vec<Bank>, Error> {
     static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
     discover_banks_with_progress(
         root,
         language,
-        &mut SoundMapCache::default(),
+        &mut GameCache::default(),
         &NEVER_CANCELLED,
         |_, _, _| {},
     )
 }
 
-/// Finds `language`'s banks, reading the shared sound maps' from
-/// `map_cache` when it has them, and adding them when it doesn't.
+/// Finds `language`'s banks, reading the shared sound maps' from `cache` when
+/// it has them, and adding them when it doesn't.
 pub fn discover_banks_with_progress(
     root: &Path,
     language: &str,
-    map_cache: &mut SoundMapCache,
+    cache: &mut GameCache,
     cancelled: &AtomicBool,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Bank>, Error> {
@@ -146,12 +134,12 @@ pub fn discover_banks_with_progress(
                 name
             }
             Source::SoundMap(path) => {
-                let map_banks = match map_cache.banks.get(&path) {
+                let map_banks = match cache.map_banks.get(&path) {
                     Some(cached) => cached.to_vec(),
                     None => {
                         let read = sound_maps::read_map_banks(&sounds, &path, map, cancelled)?;
                         if !sound_maps::is_localized(&path) {
-                            map_cache.banks.insert(path.clone(), read.as_slice().into());
+                            cache.map_banks.insert(path.clone(), read.as_slice().into());
                         }
                         read
                     }
@@ -213,7 +201,7 @@ mod tests {
         let error = discover_banks_with_progress(
             game.path(),
             "ENGLISH",
-            &mut SoundMapCache::default(),
+            &mut GameCache::default(),
             &cancelled,
             |_, _, _| {},
         )
@@ -241,26 +229,26 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let cancelled = AtomicBool::new(false);
-        let mut map_cache = SoundMapCache::default();
-        let scan = |language: &str, map_cache: &mut SoundMapCache| {
-            discover_banks_with_progress(game.path(), language, map_cache, &cancelled, |_, _, _| {})
+        let mut cache = GameCache::default();
+        let scan = |language: &str, cache: &mut GameCache| {
+            discover_banks_with_progress(game.path(), language, cache, &cancelled, |_, _, _| {})
                 .unwrap()
         };
 
-        scan("ENGLISH", &mut map_cache);
+        scan("ENGLISH", &mut cache);
         fs::write(sounds.join("MAPS.SM0"), [0; 128]).unwrap();
         fs::write(sounds.join("GERMAN/MAPS.LM0"), [0; 48]).unwrap();
         // The shared map comes from the cache, and the language's own map
         // is read again.
         assert_eq!(
-            map_sizes(&scan("GERMAN", &mut map_cache)),
+            map_sizes(&scan("GERMAN", &mut cache)),
             [
                 ("GERMAN/MAPS.LM0".to_owned(), 48),
                 ("MAPS.SM0".to_owned(), 64),
             ]
         );
         assert_eq!(
-            map_sizes(&scan("GERMAN", &mut SoundMapCache::default())),
+            map_sizes(&scan("GERMAN", &mut GameCache::default())),
             [
                 ("GERMAN/MAPS.LM0".to_owned(), 48),
                 ("MAPS.SM0".to_owned(), 128),
