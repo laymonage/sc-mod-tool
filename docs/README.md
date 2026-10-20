@@ -12,6 +12,8 @@ release, and by listening where noted.
   that name each sound, the scripts that play them and the subtitle text.
 - [Subtitle mapping](subtitle-mapping.md): how the app puts the three together
   to find each line's subtitle.
+- [Editing notes](editing-notes.md): what's known so far about replacing
+  sounds, which the app doesn't do yet.
 
 ## The `Sounds` folder
 
