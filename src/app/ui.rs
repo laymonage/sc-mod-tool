@@ -6,8 +6,8 @@ use eframe::egui::{
 };
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
-    ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW,
-    ICON_REFRESH, ICON_SEARCH, ICON_STOP, ICON_WARNING,
+    ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_DOWNLOAD, ICON_FOLDER_OPEN, ICON_PAUSE,
+    ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_STOP, ICON_WARNING,
 };
 use sc_mod_tool_core::{
     Bank, Segment, SegmentSource,
@@ -32,6 +32,7 @@ enum Action {
     SelectSegment(usize),
     TogglePlayback(usize),
     PlayOrPause(usize),
+    Export(usize),
     TogglePause,
     /// Move the seeker without seeking yet, or stop moving it.
     DragSeek(Option<f32>),
@@ -84,6 +85,10 @@ impl SCModToolApp {
             Action::PlayOrPause(index) => {
                 self.selected_segment = Some(index);
                 self.play_or_pause(ctx, index);
+            }
+            Action::Export(index) => {
+                self.selected_segment = Some(index);
+                self.export_segment(ctx, index);
             }
             Action::TogglePause => self.toggle_pause(),
             Action::DragSeek(position) => self.seek_drag = position,
@@ -646,24 +651,31 @@ impl SCModToolApp {
                         ui.label(RichText::new(bank_title(bank)).weak());
                         ui.add_space(8.0);
 
-                        // Segment actions. Export and replace will go here.
-                        let is_playing = self.active_playback.as_ref().is_some_and(|playback| {
-                            playback.segment_id == segment.id && !playback.player.is_paused()
+                        // Segment actions. Replace will go here.
+                        ui.horizontal(|ui| {
+                            let is_playing =
+                                self.active_playback.as_ref().is_some_and(|playback| {
+                                    playback.segment_id == segment.id
+                                        && !playback.player.is_paused()
+                                });
+                            let (icon, label) = if is_playing {
+                                (ICON_PAUSE, "Pause")
+                            } else {
+                                (ICON_PLAY_ARROW, "Play")
+                            };
+                            if action_button(ui, icon.codepoint, label)
+                                .on_hover_text("Space")
+                                .clicked()
+                            {
+                                actions.push(Action::PlayOrPause(row));
+                            }
+                            if action_button(ui, ICON_DOWNLOAD.codepoint, "Export…")
+                                .on_hover_text("Save as a WAV file.")
+                                .clicked()
+                            {
+                                actions.push(Action::Export(row));
+                            }
                         });
-                        let (icon, label) = if is_playing {
-                            (ICON_PAUSE, "Pause")
-                        } else {
-                            (ICON_PLAY_ARROW, "Play")
-                        };
-                        let button = ui.add(
-                            egui::Button::new(format!("{}  {label}", icon.codepoint))
-                                .min_size(egui::vec2(96.0, 28.0)),
-                        );
-                        // Named without its icon, which screen readers can't read.
-                        button.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
-                        if button.on_hover_text("Space").clicked() {
-                            actions.push(Action::PlayOrPause(row));
-                        }
 
                         ui.add_space(8.0);
                         ui.separator();
@@ -1140,8 +1152,26 @@ fn format_time(seconds: f32) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-fn segment_label(bank: &Bank, segment: &Segment) -> String {
+pub(super) fn segment_label(bank: &Bank, segment: &Segment) -> String {
     format!("{} #{}", bank_title(bank), segment.segment + 1)
+}
+
+/// The file name an exported segment is offered: a map sound's name, such as
+/// `ROGEAR_2.wav`, or else its bank's file and its number, such as
+/// `1_1_1-12.wav`.
+pub(super) fn export_file_name(bank: &Bank, segment: &Segment) -> String {
+    let name = segment.name.clone().unwrap_or_else(|| {
+        let file = bank.path.rsplit('/').next().unwrap_or(&bank.path);
+        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+        format!("{stem}-{}", segment.segment + 1)
+    });
+    // Names can be descriptions, which may hold characters some systems don't
+    // allow in file names.
+    let name: String = name
+        .chars()
+        .map(|c| if r#"/\:*?"<>|"#.contains(c) { '_' } else { c })
+        .collect();
+    format!("{name}.wav")
 }
 
 /// The bank's mission name, or its extra map's folder when `HUD` doesn't name
@@ -1173,6 +1203,15 @@ fn format_duration(segment: &Segment) -> String {
     } else {
         format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
     }
+}
+
+/// A segment action's button, with an icon before its label.
+fn action_button(ui: &mut egui::Ui, icon: &str, label: &str) -> Response {
+    let button =
+        ui.add(egui::Button::new(format!("{icon}  {label}")).min_size(egui::vec2(96.0, 28.0)));
+    // Named without its icon, which screen readers can't read.
+    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
+    button
 }
 
 /// Names an icon-only button for screen readers, which would otherwise read

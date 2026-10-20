@@ -1,4 +1,5 @@
 use std::ffi::{c_int, c_void};
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -33,6 +34,36 @@ pub struct DecodedAudio {
     pub sample_rate: u32,
     /// One or two.
     pub channels: u16,
+}
+
+impl DecodedAudio {
+    /// Writes the audio as a 16-bit PCM WAV file.
+    pub fn write_wav(&self, mut writer: impl Write) -> io::Result<()> {
+        // The RIFF size counts the 36 header bytes after it as well.
+        let data_size = u32::try_from(self.samples.len() * 2)
+            .ok()
+            .filter(|size| size.checked_add(36).is_some())
+            .ok_or_else(|| io::Error::other("The audio is too long for a WAV file."))?;
+        let block_align = self.channels * 2;
+        let byte_rate = self.sample_rate * u32::from(block_align);
+        writer.write_all(b"RIFF")?;
+        writer.write_all(&(36 + data_size).to_le_bytes())?;
+        writer.write_all(b"WAVEfmt ")?;
+        writer.write_all(&16_u32.to_le_bytes())?;
+        // PCM.
+        writer.write_all(&1_u16.to_le_bytes())?;
+        writer.write_all(&self.channels.to_le_bytes())?;
+        writer.write_all(&self.sample_rate.to_le_bytes())?;
+        writer.write_all(&byte_rate.to_le_bytes())?;
+        writer.write_all(&block_align.to_le_bytes())?;
+        writer.write_all(&16_u16.to_le_bytes())?;
+        writer.write_all(b"data")?;
+        writer.write_all(&data_size.to_le_bytes())?;
+        for sample in &self.samples {
+            writer.write_all(&sample.to_le_bytes())?;
+        }
+        writer.flush()
+    }
 }
 
 pub fn decode(
@@ -182,6 +213,34 @@ mod tests {
         let mixed = mix_layers(&loud, 6);
         assert_eq!(mixed[0], i16::MAX);
         assert_eq!(mixed[2], 50);
+    }
+
+    #[test]
+    fn writes_a_16_bit_pcm_wav_file() {
+        let audio = DecodedAudio {
+            samples: vec![1, -2, 3, -4],
+            sample_rate: 22050,
+            channels: 2,
+        };
+        let mut wav = Vec::new();
+        audio.write_wav(&mut wav).unwrap();
+
+        let u16_at = |offset: usize| u16::from_le_bytes([wav[offset], wav[offset + 1]]);
+        let u32_at =
+            |offset: usize| u32::from_le_bytes(wav[offset..offset + 4].try_into().unwrap());
+        assert_eq!(wav.len(), 44 + 8);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(u32_at(4), 44 + 8 - 8);
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u16_at(20), 1);
+        assert_eq!(u16_at(22), 2);
+        assert_eq!(u32_at(24), 22050);
+        assert_eq!(u32_at(28), 22050 * 4);
+        assert_eq!(u16_at(32), 4);
+        assert_eq!(u16_at(34), 16);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32_at(40), 8);
+        assert_eq!(&wav[44..], [1, 0, 0xfe, 0xff, 3, 0, 0xfc, 0xff]);
     }
 
     #[test]

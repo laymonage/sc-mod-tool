@@ -11,7 +11,7 @@ pub use error::Error;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufWriter, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,6 +136,26 @@ pub fn decode_segment(
             decoder::decode_map_sound(&sounds, bank_path, subsong, cancelled)
         }
     }
+}
+
+/// Decodes `segment`, like [`decode_segment`], and saves it at `destination`
+/// as a WAV file.
+pub fn export_segment(
+    root: &Path,
+    bank_path: &str,
+    segment: &Segment,
+    destination: &Path,
+    cancelled: &AtomicBool,
+) -> Result<(), Error> {
+    let audio = decode_segment(root, bank_path, segment, cancelled)?;
+    let written =
+        fs::File::create(destination).and_then(|file| audio.write_wav(BufWriter::new(file)));
+    if let Err(error) = written {
+        // Don't leave a partly written file behind.
+        let _ = fs::remove_file(destination);
+        return Err(error.to_string().into());
+    }
+    Ok(())
 }
 
 pub fn read_segment(

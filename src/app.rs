@@ -35,6 +35,11 @@ enum WorkerMessage {
         segment_id: String,
         result: Result<PlayableAudio, Error>,
     },
+    Export {
+        label: String,
+        destination: PathBuf,
+        result: Result<(), Error>,
+    },
 }
 
 enum ScanProgress {
@@ -151,6 +156,8 @@ pub struct SCModToolApp {
     /// of the playback position until it is released.
     seek_drag: Option<f32>,
     audio: AudioOutput,
+    /// Where the last segment was exported, to start there next time.
+    export_directory: Option<PathBuf>,
     status: Status,
 
     bank_filter: String,
@@ -190,6 +197,7 @@ impl SCModToolApp {
             active_playback: None,
             seek_drag: None,
             audio: AudioOutput::default(),
+            export_directory: None,
             status: Status {
                 message: String::new(),
                 is_error: false,
@@ -487,6 +495,54 @@ impl SCModToolApp {
         });
     }
 
+    /// Asks where to save the segment, then decodes it and saves it there as
+    /// a WAV file.
+    fn export_segment(&mut self, ctx: &egui::Context, segment_index: usize) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let Some(bank) = self.selected_bank() else {
+            return;
+        };
+        let Some(segment) = bank.segments.get(segment_index).cloned() else {
+            return;
+        };
+        let bank_path = bank.path.clone();
+        let label = ui::segment_label(bank, &segment);
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Export segment")
+            .set_file_name(ui::export_file_name(bank, &segment))
+            .add_filter("WAV audio", &["wav"]);
+        if let Some(directory) = &self.export_directory {
+            dialog = dialog.set_directory(directory);
+        }
+        let Some(destination) = dialog.save_file() else {
+            return;
+        };
+        self.export_directory = destination.parent().map(PathBuf::from);
+        self.set_status(format!("Exporting {label}…"), false);
+        let sender = self.sender.clone();
+        let repaint = ctx.clone();
+
+        thread::spawn(move || {
+            // Exports aren't cancelled: they're saved wherever the user chose,
+            // whatever the app goes on to show.
+            let result = sc_mod_tool_core::export_segment(
+                &root,
+                &bank_path,
+                &segment,
+                &destination,
+                &AtomicBool::new(false),
+            );
+            let _ = sender.send(WorkerMessage::Export {
+                label,
+                destination,
+                result,
+            });
+            repaint.request_repaint();
+        });
+    }
+
     /// Stops playback, keeping the segment in the status bar so it can be
     /// played again.
     fn stop_playback(&mut self) {
@@ -598,6 +654,19 @@ impl SCModToolApp {
                         }
                     }
                 }
+                WorkerMessage::Export {
+                    label,
+                    destination,
+                    result,
+                } => match result {
+                    Ok(()) => self.set_status(
+                        format!("Exported {label} to {}.", destination.display()),
+                        false,
+                    ),
+                    Err(error) => {
+                        self.set_status(format!("Could not export {label}: {error}"), true)
+                    }
+                },
             }
         }
     }
