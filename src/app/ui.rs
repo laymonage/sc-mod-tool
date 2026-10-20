@@ -1138,7 +1138,7 @@ fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
                 .desired_rows(2)
                 .desired_width(f32::INFINITY),
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&subtitle.cue).small().weak());
             if !subtitle.has_text() {
                 ui.label(RichText::new(NO_TEXT).small().italics().weak())
@@ -1175,7 +1175,7 @@ fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
 
 fn detail_row(ui: &mut egui::Ui, name: &str, value: String) {
     ui.label(RichText::new(name).weak());
-    ui.label(value);
+    ui.add(egui::Label::new(value).wrap());
     ui.end_row();
 }
 
