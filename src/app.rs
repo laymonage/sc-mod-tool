@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod screenshots;
 mod ui;
 
 use std::collections::HashMap;
@@ -888,6 +890,19 @@ impl SCModToolApp {
             is_error,
         };
     }
+}
+
+/// Sets up the fonts and style the app's UI expects.
+pub fn setup_context(ctx: &egui::Context) {
+    // Material icons look small next to text at their normal size.
+    let mut icons = egui_material_icons::font_insert();
+    icons.data.tweak.scale = 1.3;
+    ctx.add_font(icons);
+    // Show a pointing hand over buttons. Other clickable widgets set it
+    // themselves.
+    ctx.all_styles_mut(|style| {
+        style.visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+    });
 }
 
 /// The storage key for the last game folder opened.

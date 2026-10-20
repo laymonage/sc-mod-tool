@@ -432,7 +432,9 @@ impl SCModToolApp {
         };
         let bank = &self.banks[bank_index];
 
-        ui.add_space(6.0);
+        // No space above, unlike the side panels: the central panel's frame
+        // already has 6 points more margin at the top, so this starts level
+        // with them.
         // The button is laid out first so it keeps its place on the right, and
         // the title and details wrap in the space left of it.
         let initial_size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
