@@ -8,7 +8,8 @@ use eframe::egui::{
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
     ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_DOWNLOAD, ICON_FOLDER_OPEN, ICON_PAUSE,
-    ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_STOP, ICON_WARNING,
+    ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_SKIP_NEXT, ICON_SKIP_PREVIOUS, ICON_STOP,
+    ICON_WARNING,
 };
 use sc_mod_tool_core::{
     Area, Bank, Segment, SegmentSource,
@@ -22,7 +23,6 @@ const NO_TEXT_HINT: &str =
     "This line exists in its scene, but the game's localization files have no text for it.";
 
 use super::{SCModToolApp, ScanProgress, SortColumn, TextFilter};
-use crate::audio::ActivePlayback;
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
 enum Action {
@@ -34,6 +34,8 @@ enum Action {
     SelectSegment(usize),
     TogglePlayback(usize),
     PlayOrPause(usize),
+    /// Select a segment from the playback controls and play it.
+    SkipTo(usize),
     Export(usize),
     ExportBank,
     CancelBankExport,
@@ -88,6 +90,11 @@ impl SCModToolApp {
             }
             Action::PlayOrPause(index) => {
                 self.selected_segment = Some(index);
+                self.play_or_pause(ctx, index);
+            }
+            Action::SkipTo(index) => {
+                self.selected_segment = Some(index);
+                self.scroll_to_selection = true;
                 self.play_or_pause(ctx, index);
             }
             Action::Export(index) => {
@@ -228,14 +235,8 @@ impl SCModToolApp {
                             || id.to_owned(),
                             |(bank, segment)| segment_label(bank, segment),
                         );
-                        if let Some(playback) = &self.active_playback {
-                            self.show_playback_controls(ui, playback, actions);
-                        }
+                        self.show_playback_controls(ui, id, actions);
                         ui.label(label);
-                        if self.active_playback.is_none() {
-                            // Still being decoded.
-                            ui.spinner();
-                        }
                         ui.separator();
                     }
                     if let Some(export) = &self.bank_export {
@@ -311,16 +312,31 @@ impl SCModToolApp {
 
     /// The seeker, its time readout and the pause button, laid out right to
     /// left.
+    /// The controls for the segment `segment_id`. They're disabled while it's
+    /// decoded, and keep their place so they don't move between segments.
     fn show_playback_controls(
         &self,
         ui: &mut egui::Ui,
-        playback: &ActivePlayback,
+        segment_id: &str,
         actions: &mut Vec<Action>,
     ) {
-        let total = playback.duration.as_secs_f32();
-        let mut position = self
-            .seek_drag
-            .unwrap_or_else(|| playback.position().as_secs_f32());
+        let playback = self
+            .active_playback
+            .as_ref()
+            .filter(|playback| playback.segment_id == segment_id);
+        let (mut position, total) = match playback {
+            Some(playback) => (
+                self.seek_drag
+                    .unwrap_or_else(|| playback.position().as_secs_f32()),
+                playback.duration.as_secs_f32(),
+            ),
+            None => (
+                0.0,
+                self.find_segment(segment_id).map_or(0.0, |(_, segment)| {
+                    segment.sample_count as f32 / segment.sample_rate.max(1) as f32
+                }),
+            ),
+        };
         ui.label(
             RichText::new(format!(
                 "{} / {}",
@@ -331,7 +347,10 @@ impl SCModToolApp {
         );
         ui.spacing_mut().slider_width = 160.0;
         let response = ui
-            .add(egui::Slider::new(&mut position, 0.0..=total).show_value(false))
+            .add_enabled(
+                playback.is_some(),
+                egui::Slider::new(&mut position, 0.0..=total).show_value(false),
+            )
             .on_hover_and_drag_cursor(CursorIcon::PointingHand);
         // The slider has no visible label, so it's named for screen readers.
         response.widget_info(|| WidgetInfo::slider(true, f64::from(position), "Seek"));
@@ -340,14 +359,42 @@ impl SCModToolApp {
         } else if response.drag_stopped() || response.changed() {
             actions.push(Action::Seek(Duration::from_secs_f32(position)));
         }
-        let (pause_icon, name) = if playback.player.is_paused() {
-            (ICON_PLAY_ARROW, "Play")
-        } else {
-            (ICON_PAUSE, "Pause")
-        };
-        if name_icon_button(ui.button(pause_icon.codepoint), name).clicked() {
-            actions.push(Action::TogglePause);
+
+        // Laid out right to left.
+        let skip_button =
+            |ui: &mut egui::Ui, actions: &mut Vec<Action>, offset, icon: &str, name| {
+                let target = playback.and_then(|_| self.adjacent_segment(segment_id, offset));
+                let button = ui.add_enabled(target.is_some(), egui::Button::new(icon));
+                let button = name_icon_button(button, name);
+                if button.clicked()
+                    && let Some(index) = target
+                {
+                    actions.push(Action::SkipTo(index));
+                }
+                button
+            };
+        let next = skip_button(ui, actions, 1, ICON_SKIP_NEXT.codepoint, "Next");
+        // Play and pause are the same size as the skip buttons, and the
+        // spinner takes that size too, so nothing moves when it's swapped.
+        let size = next.rect.size();
+        match playback {
+            Some(playback) => {
+                let (icon, name) = if playback.player.is_paused() {
+                    (ICON_PLAY_ARROW, "Play")
+                } else {
+                    (ICON_PAUSE, "Pause")
+                };
+                let button = ui.add(egui::Button::new(icon.codepoint).min_size(size));
+                if name_icon_button(button, name).clicked() {
+                    actions.push(Action::TogglePause);
+                }
+            }
+            None => {
+                ui.add_sized(size, egui::Spinner::new())
+                    .on_hover_text("Loading…");
+            }
         }
+        skip_button(ui, actions, -1, ICON_SKIP_PREVIOUS.codepoint, "Previous");
     }
 
     fn show_loading(&self, ui: &mut egui::Ui) {
@@ -851,6 +898,18 @@ impl SCModToolApp {
                     }
                 });
             });
+    }
+
+    /// The segment `offset` places from `segment_id` in the segment table, as
+    /// it's filtered and sorted. `None` past either end, or when the segment
+    /// isn't in the selected bank, such as after choosing another bank.
+    fn adjacent_segment(&self, segment_id: &str, offset: isize) -> Option<usize> {
+        let bank = self.selected_bank()?;
+        let visible = self.visible_segments();
+        let position = visible
+            .iter()
+            .position(|&index| bank.segments[index].id == segment_id)?;
+        visible.get(position.checked_add_signed(offset)?).copied()
     }
 
     /// The selected bank's segments that match the search and filters.
@@ -1459,6 +1518,35 @@ mod tests {
         assert_eq!(duration(119_960), "2:00.0");
         assert_eq!(duration(125_040), "2:05.0");
         assert_eq!(duration(3_599_960), "60:00.0");
+    }
+
+    #[test]
+    fn skips_through_segments_in_the_tables_order() {
+        let mut app = SCModToolApp::new(None);
+        let mut bank = bank("ENGLISH/1_1_0.LS0", None, None);
+        bank.segments = (0..3)
+            .map(|number| Segment {
+                id: format!("ENGLISH/1_1_0.LS0:{number}"),
+                segment: number,
+                ..segment(1000, 1000)
+            })
+            .collect();
+        app.banks = vec![bank];
+        app.selected_bank = Some(0);
+        let id = |number| format!("ENGLISH/1_1_0.LS0:{number}");
+
+        assert_eq!(app.adjacent_segment(&id(1), 1), Some(2));
+        assert_eq!(app.adjacent_segment(&id(1), -1), Some(0));
+        assert_eq!(app.adjacent_segment(&id(2), 1), None);
+        assert_eq!(app.adjacent_segment(&id(0), -1), None);
+
+        // Sorted the other way, next goes up the bank.
+        app.segment_sort = app.segment_sort.by(SortColumn::Number);
+        assert_eq!(app.adjacent_segment(&id(1), 1), Some(0));
+
+        // A segment from another bank, such as after choosing a different one
+        // while it plays.
+        assert_eq!(app.adjacent_segment("ENGLISH/1_1_1.LS0:0", 1), None);
     }
 
     #[test]
