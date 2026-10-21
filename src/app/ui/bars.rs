@@ -5,8 +5,9 @@ use std::time::Duration;
 use eframe::egui::{self, Align, CursorIcon, Layout, RichText, Role, WidgetInfo};
 use egui_material_icons::icons::{
     ICON_AUTOPLAY, ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_REFRESH, ICON_REPEAT_ONE,
-    ICON_SKIP_NEXT, ICON_SKIP_PREVIOUS, ICON_WARNING,
+    ICON_SAVE, ICON_SAVE_AS, ICON_SKIP_NEXT, ICON_SKIP_PREVIOUS, ICON_WARNING,
 };
+use sc_mod_tool_core::edit::SaveTarget;
 
 use super::Action;
 use super::widgets::{bar_frame, name_icon_button};
@@ -26,6 +27,9 @@ impl SCModToolApp {
                     .clicked()
                 {
                     actions.push(Action::ChooseRoot);
+                }
+                if self.root.is_some() {
+                    self.show_save_buttons(ui, actions);
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -62,7 +66,10 @@ impl SCModToolApp {
                                 }
                             })
                             .response
-                            .on_hover_cursor(CursorIcon::PointingHand);
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            // The label beside it isn't tied to it, so it's
+                            // named for screen readers.
+                            .widget_info(|| WidgetInfo::labeled(Role::ComboBox, true, "Language"));
                         ui.label("Language");
                         ui.separator();
                     }
@@ -77,6 +84,60 @@ impl SCModToolApp {
                 });
             });
         });
+    }
+
+    fn show_save_buttons(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.separator();
+        let busy = self.is_saving() || self.scan_cancel.is_some() || self.discovering_languages;
+        let enabled = !self.edits.is_empty() && !busy;
+        let disabled_hint = if self.edits.is_empty() {
+            "Nothing is replaced yet."
+        } else if self.is_saving() {
+            "Saving…"
+        } else {
+            "Wait for the scan to finish."
+        };
+        let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(
+            egui::Modifiers::COMMAND,
+            egui::Key::S,
+        ));
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(format!("{} Save", ICON_SAVE.codepoint)),
+            )
+            .on_hover_text(format!(
+                "Write the replacements over the game's files, keeping the originals ({shortcut})."
+            ))
+            .on_disabled_hover_text(disabled_hint)
+            .clicked()
+        {
+            actions.push(Action::Save);
+        }
+        if ui
+            .add_enabled(
+                enabled,
+                egui::Button::new(format!("{} Save to folder…", ICON_SAVE_AS.codepoint)),
+            )
+            .on_hover_text(
+                "Write the replaced banks into a folder of their own, laid out like the game's \
+                 Sounds folder.",
+            )
+            .on_disabled_hover_text(disabled_hint)
+            .clicked()
+        {
+            actions.push(Action::SaveToFolder);
+        }
+        let count = self.edits.len();
+        if count > 0 {
+            let segments = if count == 1 { "segment" } else { "segments" };
+            let state = if self.edits.has_unsaved() {
+                "unsaved"
+            } else {
+                "saved to a folder"
+            };
+            ui.label(RichText::new(format!("{count} replaced {segments}, {state}")).weak());
+        }
     }
 
     pub(super) fn show_status_bar(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -99,12 +160,30 @@ impl SCModToolApp {
                         actions.push(Action::ToggleWarnings);
                     }
                     if let Some(id) = self.loaded_segment_id() {
-                        let label = self.find_segment(id).map_or_else(
+                        let mut label = self.find_segment(id).map_or_else(
                             || id.to_owned(),
                             |(bank, segment)| segment_label(bank, segment),
                         );
+                        if self.is_original_loaded() {
+                            label.push_str(" (original)");
+                        }
                         self.show_playback_controls(ui, id, actions);
                         ui.label(label);
+                        ui.separator();
+                    }
+                    if let Some(job) = &self.save_job {
+                        if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            ui.label("Cancelling save…");
+                        } else {
+                            if ui.button("Cancel").clicked() {
+                                actions.push(Action::CancelSave);
+                            }
+                            ui.label(match job.target {
+                                SaveTarget::InPlace => "Saving…",
+                                SaveTarget::Folder(_) => "Saving to a folder…",
+                            });
+                        }
+                        ui.spinner();
                         ui.separator();
                     }
                     if let Some(export) = &self.bank_export {

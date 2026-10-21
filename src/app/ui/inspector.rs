@@ -1,9 +1,12 @@
 //! The selected segment's details, on the right.
 
 use eframe::egui::{self, CursorIcon, RichText};
-use egui_material_icons::icons::{ICON_DOWNLOAD, ICON_PAUSE, ICON_PLAY_ARROW};
+use egui_material_icons::icons::{
+    ICON_AUDIO_FILE, ICON_DOWNLOAD, ICON_HISTORY, ICON_PAUSE, ICON_PLAY_ARROW, ICON_UNDO,
+};
 use sc_mod_tool_core::{Area, SegmentSource, subtitles::Subtitle};
 
+use super::replace::{file_name, fit_description};
 use super::widgets::{action_button, badge, detail_row, small_detail_row};
 use super::{
     Action, NO_TEXT, NO_TEXT_HINT, NOT_SHOWN_IN_GAME, NOT_SHOWN_IN_GAME_HINT, is_shown_in_game,
@@ -45,13 +48,19 @@ impl SCModToolApp {
                                 .strong(),
                         );
                         ui.label(RichText::new(bank_title(bank)).weak());
+                        let replacement = self.replacement(&bank.path, &segment.id);
+                        if replacement.is_some() {
+                            ui.add_space(4.0);
+                            badge(ui, "Replaced")
+                                .on_hover_text("It plays its replacement until you revert it.");
+                        }
                         ui.add_space(8.0);
 
-                        // Segment actions. Replace will go here.
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let is_playing =
                                 self.active_playback.as_ref().is_some_and(|playback| {
                                     playback.segment_id == segment.id
+                                        && !playback.original
                                         && !playback.player.is_paused()
                                 });
                             let (icon, label) = if is_playing {
@@ -71,7 +80,72 @@ impl SCModToolApp {
                             {
                                 actions.push(Action::Export(row));
                             }
+                            // Only numbered banks' streams can be replaced so far.
+                            if segment.stream_range().is_some()
+                                && action_button(ui, ICON_AUDIO_FILE.codepoint, "Replace…")
+                                    .on_hover_text("Choose an audio file to play instead.")
+                                    .clicked()
+                            {
+                                actions.push(Action::Replace(row));
+                            }
                         });
+
+                        if let Some(replacement) = replacement {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.label(RichText::new("Replacement").strong());
+                            egui::Grid::new("replacement")
+                                .num_columns(2)
+                                .spacing([16.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("File").weak());
+                                    ui.add(egui::Label::new(file_name(&replacement.source)).wrap())
+                                        .on_hover_text(replacement.source.display().to_string());
+                                    ui.end_row();
+                                    detail_row(
+                                        ui,
+                                        "Fit",
+                                        fit_description(&replacement.fit, segment.sample_rate),
+                                    );
+                                    let saved = if self.edits.has_unsaved() {
+                                        "Not saved yet"
+                                    } else {
+                                        "Saved to a folder, not the game"
+                                    };
+                                    detail_row(ui, "Status", saved);
+                                });
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                let original_playing =
+                                    self.active_playback.as_ref().is_some_and(|playback| {
+                                        playback.segment_id == segment.id
+                                            && playback.original
+                                            && !playback.player.is_paused()
+                                    });
+                                if original_playing {
+                                    if action_button(ui, ICON_PAUSE.codepoint, "Pause").clicked() {
+                                        actions.push(Action::TogglePause);
+                                    }
+                                } else if action_button(ui, ICON_HISTORY.codepoint, "Original")
+                                    .on_hover_text("Play the game's own audio.")
+                                    .clicked()
+                                {
+                                    actions.push(Action::PlayOriginal(
+                                        bank.path.clone(),
+                                        segment.id.clone(),
+                                    ));
+                                }
+                                if action_button(ui, ICON_UNDO.codepoint, "Revert")
+                                    .on_hover_text("Remove the replacement.")
+                                    .clicked()
+                                {
+                                    actions.push(Action::Revert(
+                                        bank.path.clone(),
+                                        segment.id.clone(),
+                                    ));
+                                }
+                            });
+                        }
 
                         ui.add_space(8.0);
                         ui.separator();

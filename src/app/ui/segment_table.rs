@@ -3,8 +3,8 @@
 use eframe::egui::{self, Align, CursorIcon, Layout, RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
-    ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_DOWNLOAD, ICON_PLAY_ARROW, ICON_SEARCH, ICON_STOP,
-    ICON_WARNING,
+    ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_DOWNLOAD, ICON_FIBER_MANUAL_RECORD,
+    ICON_PLAY_ARROW, ICON_SEARCH, ICON_STOP, ICON_UNDO, ICON_WARNING,
 };
 use sc_mod_tool_core::{SegmentSource, subtitles::Subtitle};
 
@@ -44,6 +44,18 @@ impl SCModToolApp {
                 if button.clicked() {
                     actions.push(Action::ExportBank);
                 }
+            }
+            let replaced = self.edits.bank_len(&bank.path);
+            if replaced > 0
+                && ui
+                    .button(format!("{} Revert bank", ICON_UNDO.codepoint))
+                    .on_hover_text(match replaced {
+                        1 => "Remove the bank's replacement.".to_owned(),
+                        count => format!("Remove the bank's {count} replacements."),
+                    })
+                    .clicked()
+            {
+                actions.push(Action::RevertBank(bank.path.clone()));
             }
             ui.with_layout(
                 Layout::left_to_right(Align::Center).with_main_wrap(true),
@@ -117,7 +129,11 @@ impl SCModToolApp {
                         }
                     })
                     .response
-                    .on_hover_cursor(CursorIcon::PointingHand);
+                    .on_hover_cursor(CursorIcon::PointingHand)
+                    // It has no visible label, so it's named for screen readers.
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Show segments")
+                    });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
@@ -203,6 +219,14 @@ impl SCModToolApp {
                     });
                     row.col(|ui| {
                         ui.label(format!("{}", segment.segment + 1));
+                        if self.replacement(&bank.path, &segment.id).is_some() {
+                            ui.label(
+                                RichText::new(ICON_FIBER_MANUAL_RECORD.codepoint)
+                                    .small()
+                                    .color(ui.visuals().selection.stroke.color),
+                            )
+                            .on_hover_text("Replaced");
+                        }
                     });
                     row.col(|ui| {
                         ui.label(format_duration(segment));

@@ -50,7 +50,10 @@ impl SCModToolApp {
                                     ui.label(RichText::new(group).small().weak());
                                     shown_group = Some(group);
                                 }
-                                if bank_row(ui, bank, self.selected_bank == Some(index)).clicked() {
+                                let replaced = self.edits.bank_len(&bank.path);
+                                if bank_row(ui, bank, self.selected_bank == Some(index), replaced)
+                                    .clicked()
+                                {
                                     actions.push(Action::SelectBank(index));
                                 }
                             }
@@ -63,7 +66,9 @@ impl SCModToolApp {
     }
 }
 
-fn bank_row(ui: &mut egui::Ui, bank: &Bank, selected: bool) -> egui::Response {
+/// A bank's row, with how many segments it has, and a dot when `replaced` of
+/// them are replaced.
+fn bank_row(ui: &mut egui::Ui, bank: &Bank, selected: bool, replaced: usize) -> egui::Response {
     let name = if bank.segments.is_empty() {
         RichText::new(&bank.name).weak()
     } else {
@@ -75,14 +80,26 @@ fn bank_row(ui: &mut egui::Ui, bank: &Bank, selected: bool) -> egui::Response {
     } else {
         (bank.segments.len().to_string(), None)
     };
-    ui.painter().text(
+    let count = ui.painter().text(
         response.rect.right_center() - egui::vec2(6.0, 0.0),
         Align2::RIGHT_CENTER,
         count,
         egui::TextStyle::Small.resolve(ui.style()),
         ui.visuals().weak_text_color(),
     );
-    match hint {
+    let replaced = match replaced {
+        0 => None,
+        1 => Some("1 segment replaced".to_owned()),
+        count => Some(format!("{count} segments replaced")),
+    };
+    if replaced.is_some() {
+        ui.painter().circle_filled(
+            count.left_center() - egui::vec2(6.0, 0.0),
+            3.0,
+            ui.visuals().selection.stroke.color,
+        );
+    }
+    match hint.map(str::to_owned).or(replaced) {
         Some(hint) => response.on_hover_text(hint),
         None => response,
     }

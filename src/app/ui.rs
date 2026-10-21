@@ -1,6 +1,7 @@
 mod banks;
 mod bars;
 mod inspector;
+mod replace;
 mod segment_table;
 mod widgets;
 
@@ -44,8 +45,9 @@ enum Action {
     SortBy(SortColumn),
     /// Choose an audio file to replace a segment with.
     Replace(usize),
-    /// Play the game's own audio for a replaced segment.
-    PlayOriginal(usize),
+    /// Play the game's own audio for a replaced segment, by bank path and
+    /// segment ID.
+    PlayOriginal(String, String),
     /// Remove a replacement, by bank path and segment ID.
     Revert(String, String),
     /// Remove all of a bank's replacements, by its path.
@@ -59,6 +61,9 @@ enum Action {
     SaveToFolder,
     CancelSave,
     ResolveUnsaved(UnsavedChoice),
+    /// Answer whether to save over the game's files.
+    ConfirmSave(bool),
+    StopPlayback,
 }
 
 impl SCModToolApp {
@@ -79,6 +84,9 @@ impl SCModToolApp {
             egui::CentralPanel::default().show(ui, |ui| self.show_segments(ui, &mut actions));
         }
         self.show_warnings_window(&ctx);
+        self.show_replace_dialog(&ctx, &mut actions);
+        self.show_unsaved_prompt(&ctx, &mut actions);
+        self.show_save_confirmation(&ctx, &mut actions);
 
         // Show what the actions change, e.g. playback starting, which keeps
         // repainting from the next frame.
@@ -126,9 +134,8 @@ impl SCModToolApp {
                 self.selected_segment = Some(index);
                 self.start_replacement(ctx, index);
             }
-            Action::PlayOriginal(index) => {
-                self.selected_segment = Some(index);
-                self.play_original(ctx, index);
+            Action::PlayOriginal(bank_path, segment_id) => {
+                self.play_original(ctx, &bank_path, &segment_id);
             }
             Action::Revert(bank_path, segment_id) => self.revert_segment(&bank_path, &segment_id),
             Action::RevertBank(bank_path) => self.revert_bank(&bank_path),
@@ -137,16 +144,26 @@ impl SCModToolApp {
             Action::ApplyDraft => self.apply_draft(ctx),
             Action::CloseDraft => self.close_draft(),
             Action::ChooseFfmpeg => self.choose_ffmpeg(),
-            Action::Save => self.save_in_place(ctx),
+            Action::Save => self.request_save_in_place(ctx),
             Action::SaveToFolder => self.save_to_folder(ctx),
             Action::CancelSave => self.cancel_save(),
             Action::ResolveUnsaved(choice) => self.resolve_unsaved(ctx, choice),
+            Action::ConfirmSave(confirmed) => self.confirm_save(ctx, confirmed),
+            Action::StopPlayback => self.stop_playback(),
         }
     }
 
-    /// Arrow keys move through the segment list, and Space plays or pauses the
-    /// selected segment.
+    /// Arrow keys move through the segment list, Space plays or pauses the
+    /// selected segment, and Ctrl+S (Cmd+S on a Mac) saves.
     fn handle_keyboard(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        // Dialogs have their own buttons, and the selection mustn't move
+        // under them.
+        if self.draft.is_some() || self.unsaved_prompt.is_some() || self.confirming_save {
+            return;
+        }
+        if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::S)) {
+            actions.push(Action::Save);
+        }
         if ctx.egui_wants_keyboard_input() || self.selected_bank().is_none() {
             return;
         }
@@ -231,7 +248,8 @@ fn show_welcome(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
                     .strong(),
             );
             ui.add_space(6.0);
-            ui.label("Browse and play the game's voice and sound banks, with their subtitles.");
+            ui.label("Browse and play the game's voice and sound banks, with their subtitles,");
+            ui.label("and replace voice lines with your own audio.");
             ui.add_space(16.0);
             if ui
                 .add(egui::Button::new(

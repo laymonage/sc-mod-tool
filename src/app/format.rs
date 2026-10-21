@@ -9,7 +9,13 @@ pub(super) fn format_time(seconds: f32) -> String {
 }
 
 pub(super) fn format_duration(segment: &Segment) -> String {
-    let seconds = f64::from(segment.sample_count) / f64::from(segment.sample_rate.max(1));
+    format_length(segment.sample_count as usize, segment.sample_rate)
+}
+
+/// Formats `sample_count` samples at `sample_rate` as seconds, or minutes and
+/// seconds.
+pub(super) fn format_length(sample_count: usize, sample_rate: u32) -> String {
+    let seconds = sample_count as f64 / f64::from(sample_rate.max(1));
     // Rounded to tenths before the minutes are split off, so 119.96 s is
     // 2:00.0, not 1:60.0.
     let tenths = (seconds * 10.0).round() as u64;

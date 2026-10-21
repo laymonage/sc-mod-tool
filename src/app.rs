@@ -279,6 +279,13 @@ pub struct SCModToolApp {
     /// The bank and segment to select once the scan in progress finishes, by
     /// path and ID.
     reselect: Option<(String, Option<String>)>,
+    /// Whether the user is being asked to confirm saving over the game's
+    /// files.
+    confirming_save: bool,
+    /// Whether they've confirmed it, which is only asked once.
+    save_confirmed: bool,
+    /// The window's title, kept to change it only when it should.
+    window_title: String,
 }
 
 impl SCModToolApp {
@@ -332,6 +339,9 @@ impl SCModToolApp {
             ffmpeg_path: None,
             source_directory: None,
             reselect: None,
+            confirming_save: false,
+            save_confirmed: false,
+            window_title: String::new(),
         }
     }
 
@@ -339,16 +349,6 @@ impl SCModToolApp {
     pub fn with_ffmpeg_path(mut self, path: Option<PathBuf>) -> Self {
         self.ffmpeg_path = path;
         self
-    }
-
-    fn choose_root(&mut self, ctx: &egui::Context) {
-        let Some(root) = rfd::FileDialog::new()
-            .set_title("Select the Splinter Cell installation or Sounds folder")
-            .pick_folder()
-        else {
-            return;
-        };
-        self.open_root(ctx, root);
     }
 
     fn open_root(&mut self, ctx: &egui::Context, root: PathBuf) {
@@ -634,16 +634,22 @@ impl SCModToolApp {
         }
     }
 
-    /// Plays the game's own audio for the segment, even if it's replaced.
-    fn play_original(&mut self, ctx: &egui::Context, segment_index: usize) {
-        let Some(bank) = self.selected_bank() else {
+    /// Plays the game's own audio for the segment `segment_id` in the bank at
+    /// `bank_path`, even if it's replaced. The bank must be the one selected.
+    fn play_original(&mut self, ctx: &egui::Context, bank_path: &str, segment_id: &str) {
+        let Some(bank) = self.selected_bank().filter(|bank| bank.path == bank_path) else {
             return;
         };
-        let Some(segment) = bank.segments.get(segment_index) else {
+        let Some(index) = bank
+            .segments
+            .iter()
+            .position(|segment| segment.id == segment_id)
+        else {
             return;
         };
-        let original = self.replacement(&bank.path, &segment.id).is_some();
-        self.decode_and_play(ctx, segment_index, original);
+        let original = self.replacement(bank_path, segment_id).is_some();
+        self.selected_segment = Some(index);
+        self.decode_and_play(ctx, index, original);
     }
 
     /// Plays audio that's already decoded, such as a replacement's.
@@ -1098,6 +1104,25 @@ impl SCModToolApp {
         }
     }
 
+    /// Marks the window's title while there are unsaved replacements.
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = if self.edits.has_unsaved() {
+            let count = self.edits.len();
+            let noun = if count == 1 {
+                "replacement"
+            } else {
+                "replacements"
+            };
+            format!("SC Mod Tool ({count} unsaved {noun})")
+        } else {
+            "SC Mod Tool".to_owned()
+        };
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
+    }
+
     fn set_status(&mut self, message: impl Into<String>, is_error: bool) {
         self.status = Status {
             message: message.into(),
@@ -1152,6 +1177,7 @@ impl eframe::App for SCModToolApp {
         }
         self.handle_messages(ctx);
         self.guard_close(ctx);
+        self.update_title(ctx);
         if self
             .active_playback
             .as_ref()

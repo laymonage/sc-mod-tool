@@ -90,15 +90,21 @@ impl PendingEdits {
         self.banks.is_empty()
     }
 
+    /// How many banks have replacements.
+    pub(super) fn bank_count(&self) -> usize {
+        self.banks.len()
+    }
+
     /// How many of the bank's segments are replaced.
     pub(super) fn bank_len(&self, bank_path: &str) -> usize {
         self.banks.get(bank_path).map_or(0, BTreeMap::len)
     }
 
     /// Whether there are replacements that haven't been saved or exported
-    /// since they were made or reverted.
+    /// since they were made or reverted. Reverting the last one leaves
+    /// nothing to save.
     pub(super) fn has_unsaved(&self) -> bool {
-        self.unsaved
+        self.unsaved && !self.banks.is_empty()
     }
 
     fn bank_edits(&self) -> Vec<BankEdit> {
@@ -163,6 +169,25 @@ impl ReplacementDraft {
     }
 }
 
+#[cfg(test)]
+impl ReplacementDraft {
+    /// A draft for `segment`, with a replacement of `sample_count` samples
+    /// already prepared for its options.
+    pub(super) fn prepared(bank_path: &str, segment: Segment, sample_count: u32) -> Self {
+        let offset = segment.stream_range().unwrap().0;
+        Self {
+            bank_path: bank_path.to_owned(),
+            segment,
+            source: PathBuf::from("line.wav"),
+            samples: Some(Arc::new(vec![0; sample_count as usize])),
+            fit: FitOptions::default(),
+            prepared: Some(super::test_support::replacement(offset, sample_count)),
+            error: None,
+            job: None,
+        }
+    }
+}
+
 /// Work on a draft in a worker thread.
 struct DraftJob {
     request: u64,
@@ -189,10 +214,21 @@ pub(super) struct SaveJob {
 }
 
 /// Something that would lose unsaved replacements, so it's asked about first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum GuardedAction {
-    ChooseRoot,
+    /// Open the game folder chosen.
+    OpenRoot(PathBuf),
     Quit,
+}
+
+impl GuardedAction {
+    /// What it is, to say it didn't happen.
+    fn description(&self) -> &'static str {
+        match self {
+            GuardedAction::OpenRoot(_) => "The other game folder wasn't opened.",
+            GuardedAction::Quit => "The app didn't quit.",
+        }
+    }
 }
 
 /// The answers to the question about unsaved replacements.
@@ -259,10 +295,19 @@ impl SCModToolApp {
         self.start_draft_job(ctx, AfterPrepare::Nothing);
     }
 
+    /// Changes how the draft's audio is fitted. A replacement being prepared
+    /// for the old options is no longer wanted, so that work stops.
     pub(super) fn set_draft_fit(&mut self, fit: FitOptions) {
-        if let Some(draft) = &mut self.draft {
-            draft.fit = fit;
-            draft.error = None;
+        let Some(draft) = &mut self.draft else {
+            return;
+        };
+        draft.fit = fit;
+        draft.error = None;
+        // Unless the file is still being read, which the new options need too.
+        if draft.samples.is_some()
+            && let Some(job) = draft.job.take()
+        {
+            job.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -450,6 +495,24 @@ impl SCModToolApp {
         self.save_job.is_some()
     }
 
+    /// Writes the replacements over the game's files, asking first the first
+    /// time.
+    pub(super) fn request_save_in_place(&mut self, ctx: &egui::Context) {
+        if self.save_confirmed {
+            self.save_in_place(ctx);
+        } else {
+            self.confirming_save = true;
+        }
+    }
+
+    pub(super) fn confirm_save(&mut self, ctx: &egui::Context, confirmed: bool) {
+        self.confirming_save = false;
+        if confirmed {
+            self.save_confirmed = true;
+            self.save_in_place(ctx);
+        }
+    }
+
     /// Writes the replacements over the game's files.
     pub(super) fn save_in_place(&mut self, ctx: &egui::Context) {
         self.start_save(ctx, SaveTarget::InPlace, None);
@@ -468,22 +531,35 @@ impl SCModToolApp {
         self.start_save(ctx, SaveTarget::Folder(folder), None);
     }
 
+    /// Starts saving to `target`, then doing `then` if everything is saved.
+    /// Without anything to save, `then` is done straight away.
     fn start_save(&mut self, ctx: &egui::Context, target: SaveTarget, then: Option<GuardedAction>) {
-        if self.save_job.is_some() {
+        if self.edits.is_empty() {
+            match then {
+                Some(action) => self.perform(ctx, action),
+                None => self.set_status("There's nothing to save.", false),
+            }
             return;
         }
-        let Some(root) = self.root.clone() else {
+        let refusal = if self.save_job.is_some() {
+            Some("Wait for the save to finish.")
+        } else if self.scan_cancel.is_some() || self.discovering_languages {
+            // A scan may have the files open.
+            Some("Wait for the scan to finish before saving.")
+        } else if self.root.is_none() {
+            Some("Open the game folder first.")
+        } else {
+            None
+        };
+        let Some(root) = self.root.clone().filter(|_| refusal.is_none()) else {
+            let refusal = refusal.unwrap_or_default();
+            let message = match &then {
+                Some(action) => format!("{refusal} {}", action.description()),
+                None => refusal.to_owned(),
+            };
+            self.set_status(message, true);
             return;
         };
-        if self.edits.is_empty() {
-            self.set_status("There's nothing to save.", false);
-            return;
-        }
-        // A scan may have the files open.
-        if self.scan_cancel.is_some() || self.discovering_languages {
-            self.set_status("Wait for the scan to finish before saving.", true);
-            return;
-        }
         let edits = self.edits.bank_edits();
         let cancel = Arc::new(AtomicBool::new(false));
         self.save_job = Some(SaveJob {
@@ -532,9 +608,12 @@ impl SCModToolApp {
         match &job.target {
             SaveTarget::InPlace => {
                 self.edits.saved_in_place(&report.saved);
-                if saved > 0 {
-                    // The banks changed, so read them again, keeping what's
-                    // selected.
+                // The banks changed, so they're read again, unless what the
+                // save was for is about to quit or open another game. If a
+                // bank failed, that doesn't happen, and the app stays here.
+                let leaving = job.then.is_some() && report.is_complete();
+                if saved > 0 && !leaving {
+                    // Keep what's selected.
                     self.reselect = self.selected_bank().map(|bank| {
                         (
                             bank.path.clone(),
@@ -569,10 +648,14 @@ impl SCModToolApp {
         }
         if let Some(failure) = report.failures.first() {
             let failed = report.failures.len();
+            let not_done = job.then.as_ref().map_or("", GuardedAction::description);
             self.set_status(
                 format!(
-                    "Saved {saved} {banks}, but {failed} could not be saved, such as: {failure}"
-                ),
+                    "Saved {saved} {banks}, but {failed} could not be saved, such as: \
+                     {failure} {not_done}"
+                )
+                .trim_end()
+                .to_owned(),
                 true,
             );
         } else if let Some(action) = job.then {
@@ -580,10 +663,21 @@ impl SCModToolApp {
         }
     }
 
-    /// Opens another game folder, asking first if there are unsaved
-    /// replacements.
+    /// Asks for another game folder, then opens it, asking first about
+    /// unsaved replacements. The folder is chosen first, so that cancelling
+    /// the choice keeps them.
     pub(super) fn request_choose_root(&mut self, ctx: &egui::Context) {
-        self.guard(ctx, GuardedAction::ChooseRoot);
+        if self.save_job.is_some() {
+            self.set_status("Wait for the save to finish.", true);
+            return;
+        }
+        let Some(root) = rfd::FileDialog::new()
+            .set_title("Select the Splinter Cell installation or Sounds folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        self.guard(ctx, GuardedAction::OpenRoot(root));
     }
 
     fn guard(&mut self, ctx: &egui::Context, action: GuardedAction) {
@@ -612,7 +706,7 @@ impl SCModToolApp {
 
     fn perform(&mut self, ctx: &egui::Context, action: GuardedAction) {
         match action {
-            GuardedAction::ChooseRoot => self.choose_root(ctx),
+            GuardedAction::OpenRoot(root) => self.open_root(ctx, root),
             GuardedAction::Quit => {
                 self.closing = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -693,52 +787,8 @@ fn prepare(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::test_support::segment;
-    use sc_mod_tool_core::SegmentSource;
+    use crate::app::test_support::{replacement, stream_segment};
     use sc_mod_tool_core::decoder::DecodedAudio;
-
-    fn replacement(offset: u64, sample_count: u32) -> Replacement {
-        Replacement {
-            source: PathBuf::from("line.wav"),
-            fit: FitOptions::default(),
-            offset,
-            stream: Arc::from(vec![offset as u8; 4]),
-            sample_count,
-            preview: PlayableAudio::new(DecodedAudio {
-                samples: vec![0; sample_count as usize],
-                sample_rate: 36000,
-                channels: 1,
-            })
-            .unwrap(),
-        }
-    }
-
-    fn stream_segment(bank_path: &str, offset: u64, sample_count: u32) -> Segment {
-        Segment {
-            id: format!("{bank_path}:{offset}"),
-            source: SegmentSource::Stream {
-                offset,
-                byte_length: 100,
-            },
-            ..segment(sample_count, 36000)
-        }
-    }
-
-    /// A draft for `segment`, with a replacement for its current options
-    /// already prepared.
-    fn prepared_draft(bank_path: &str, segment: Segment, sample_count: u32) -> ReplacementDraft {
-        let offset = segment.stream_range().unwrap().0;
-        ReplacementDraft {
-            bank_path: bank_path.to_owned(),
-            segment,
-            source: PathBuf::from("line.wav"),
-            samples: Some(Arc::new(vec![0; sample_count as usize])),
-            fit: FitOptions::default(),
-            prepared: Some(replacement(offset, sample_count)),
-            error: None,
-            job: None,
-        }
-    }
 
     #[test]
     fn pending_edits_track_changes_by_bank() {
@@ -779,6 +829,77 @@ mod tests {
     }
 
     #[test]
+    fn reverting_everything_leaves_nothing_unsaved() {
+        let mut edits = PendingEdits::default();
+        edits.insert(
+            "ENGLISH/1_1_0.LS0",
+            "ENGLISH/1_1_0.LS0:0",
+            replacement(0, 10),
+        );
+        edits.remove("ENGLISH/1_1_0.LS0", "ENGLISH/1_1_0.LS0:0");
+        assert!(!edits.has_unsaved());
+        edits.insert(
+            "ENGLISH/1_1_0.LS0",
+            "ENGLISH/1_1_0.LS0:0",
+            replacement(0, 10),
+        );
+        edits.remove_bank("ENGLISH/1_1_0.LS0");
+        assert!(!edits.has_unsaved());
+    }
+
+    #[test]
+    fn changing_the_options_stops_preparing_the_old_ones() {
+        let bank_path = "ENGLISH/1_1_0.LS0";
+        let mut app = SCModToolApp::new(None);
+        let mut draft = ReplacementDraft::prepared(bank_path, stream_segment(bank_path, 0, 10), 10);
+        let cancel = Arc::new(AtomicBool::new(false));
+        draft.job = Some(DraftJob {
+            request: 1,
+            cancel: Arc::clone(&cancel),
+            then: AfterPrepare::Apply,
+        });
+        app.draft = Some(draft);
+        app.set_draft_fit(FitOptions {
+            start: 5,
+            ..FitOptions::default()
+        });
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(!app.draft.as_ref().unwrap().is_busy());
+    }
+
+    #[test]
+    fn a_refused_save_says_what_didnt_happen() {
+        let mut app = SCModToolApp::new(None);
+        let ctx = egui::Context::default();
+        app.root = Some(PathBuf::from("game"));
+        app.edits.insert(
+            "ENGLISH/1_1_0.LS0",
+            "ENGLISH/1_1_0.LS0:0",
+            replacement(0, 10),
+        );
+        app.scan_cancel = Some(Arc::default());
+        app.unsaved_prompt = Some(GuardedAction::Quit);
+        app.resolve_unsaved(&ctx, UnsavedChoice::Save);
+        assert!(!app.closing);
+        assert!(app.status.is_error);
+        assert!(
+            app.status.message.contains("didn't quit"),
+            "{}",
+            app.status.message
+        );
+        assert_eq!(app.edits.len(), 1);
+    }
+
+    #[test]
+    fn saving_nothing_goes_ahead() {
+        let mut app = SCModToolApp::new(None);
+        let ctx = egui::Context::default();
+        app.unsaved_prompt = Some(GuardedAction::Quit);
+        app.resolve_unsaved(&ctx, UnsavedChoice::Save);
+        assert!(app.closing);
+    }
+
+    #[test]
     fn exported_edits_are_kept_for_the_next_export() {
         let mut edits = PendingEdits::default();
         edits.insert(
@@ -786,15 +907,21 @@ mod tests {
             "ENGLISH/1_1_0.LS0:0",
             replacement(0, 10),
         );
+        edits.insert("GERMAN/1_1_0.LS0", "GERMAN/1_1_0.LS0:0", replacement(0, 10));
         edits.exported();
         assert!(!edits.has_unsaved());
-        assert_eq!(edits.len(), 1);
+        assert_eq!(edits.len(), 2);
 
         // Reverting is a change too, and removes empty banks.
         edits.remove("ENGLISH/1_1_0.LS0", "ENGLISH/1_1_0.LS0:0");
         assert!(edits.has_unsaved());
-        assert!(edits.is_empty());
-        assert!(edits.bank_edits().is_empty());
+        assert_eq!(edits.len(), 1);
+        let paths: Vec<_> = edits
+            .bank_edits()
+            .into_iter()
+            .map(|bank| bank.path)
+            .collect();
+        assert_eq!(paths, ["GERMAN/1_1_0.LS0"]);
     }
 
     #[test]
@@ -802,7 +929,7 @@ mod tests {
         let mut app = SCModToolApp::new(None);
         let ctx = egui::Context::default();
         let bank_path = "ENGLISH/1_1_0.LS0";
-        app.draft = Some(prepared_draft(
+        app.draft = Some(ReplacementDraft::prepared(
             bank_path,
             stream_segment(bank_path, 64, 10),
             10,
@@ -822,7 +949,7 @@ mod tests {
         let mut app = SCModToolApp::new(None);
         let ctx = egui::Context::default();
         let bank_path = "ENGLISH/1_1_0.LS0";
-        app.draft = Some(prepared_draft(
+        app.draft = Some(ReplacementDraft::prepared(
             bank_path,
             stream_segment(bank_path, 0, 10),
             12,
@@ -837,7 +964,7 @@ mod tests {
     fn changing_the_options_needs_a_new_replacement() {
         let bank_path = "ENGLISH/1_1_0.LS0";
         let mut app = SCModToolApp::new(None);
-        app.draft = Some(prepared_draft(
+        app.draft = Some(ReplacementDraft::prepared(
             bank_path,
             stream_segment(bank_path, 0, 10),
             10,
@@ -854,7 +981,7 @@ mod tests {
     fn a_stale_draft_job_is_ignored() {
         let bank_path = "ENGLISH/1_1_0.LS0";
         let mut app = SCModToolApp::new(None);
-        let mut draft = prepared_draft(bank_path, stream_segment(bank_path, 0, 10), 10);
+        let mut draft = ReplacementDraft::prepared(bank_path, stream_segment(bank_path, 0, 10), 10);
         draft.prepared = None;
         draft.job = Some(DraftJob {
             request: 2,
@@ -880,8 +1007,9 @@ mod tests {
             "ENGLISH/1_1_0.LS0:0",
             replacement(0, 10),
         );
-        app.request_choose_root(&ctx);
-        assert_eq!(app.unsaved_prompt, Some(GuardedAction::ChooseRoot));
+        let other = GuardedAction::OpenRoot(PathBuf::from("other game"));
+        app.guard(&ctx, other.clone());
+        assert_eq!(app.unsaved_prompt, Some(other));
         app.resolve_unsaved(&ctx, UnsavedChoice::Cancel);
         assert_eq!(app.unsaved_prompt, None);
         assert_eq!(app.edits.len(), 1);
@@ -957,6 +1085,62 @@ mod tests {
         assert!(!app.status.is_error);
         // Saving was asked for before quitting, which can go ahead now.
         assert!(app.closing);
+
+        // Saving in place before quitting doesn't read the banks again.
+        let mut app = SCModToolApp::new(None);
+        app.root = Some(PathBuf::from("game"));
+        app.selected_language = Some("ENGLISH".to_owned());
+        app.edits.insert(
+            "ENGLISH/1_1_0.LS0",
+            "ENGLISH/1_1_0.LS0:0",
+            replacement(0, 10),
+        );
+        app.save_job = Some(SaveJob {
+            target: SaveTarget::InPlace,
+            cancel: Arc::default(),
+            then: Some(GuardedAction::Quit),
+        });
+        let report = SaveReport {
+            saved: vec!["ENGLISH/1_1_0.LS0".to_owned()],
+            ..SaveReport::default()
+        };
+        app.finish_save(&ctx, Ok(report));
+        assert!(app.closing);
+        assert!(app.scan_cancel.is_none());
+
+        // If a bank fails, the app doesn't quit, so the saved ones are read
+        // again.
+        let mut app = SCModToolApp::new(None);
+        app.root = Some(PathBuf::from("game"));
+        app.selected_language = Some("ENGLISH".to_owned());
+        app.edits.insert(
+            "ENGLISH/1_1_0.LS0",
+            "ENGLISH/1_1_0.LS0:0",
+            replacement(0, 10),
+        );
+        app.edits.insert(
+            "ENGLISH/1_1_1.LS0",
+            "ENGLISH/1_1_1.LS0:0",
+            replacement(0, 10),
+        );
+        app.save_job = Some(SaveJob {
+            target: SaveTarget::InPlace,
+            cancel: Arc::default(),
+            then: Some(GuardedAction::Quit),
+        });
+        let report = SaveReport {
+            saved: vec!["ENGLISH/1_1_0.LS0".to_owned()],
+            failures: vec!["Could not write ENGLISH/1_1_1.LS0".to_owned()],
+            ..SaveReport::default()
+        };
+        app.finish_save(&ctx, Ok(report));
+        assert!(!app.closing);
+        assert!(
+            app.status.message.contains("didn't quit"),
+            "{}",
+            app.status.message
+        );
+        assert!(app.scan_cancel.is_some());
     }
 
     #[test]
@@ -973,5 +1157,107 @@ mod tests {
         app.save_in_place(&ctx);
         assert!(app.save_job.is_none());
         assert!(app.status.is_error);
+    }
+
+    /// Replaces a segment of a real game's first numbered bank with a tone,
+    /// stretched to fit, then saves it to a folder, through the same workers
+    /// the UI uses. It needs FFmpeg, and the game in `SC_GAME_DIR` or
+    /// `../Splinter Cell`.
+    #[test]
+    #[ignore = "needs the game files and FFmpeg"]
+    fn replaces_a_real_segment() {
+        use std::time::{Duration, Instant};
+
+        let root = std::env::var_os("SC_GAME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../Splinter Cell"));
+        let scratch = std::env::temp_dir().join(format!("sc-mod-tool-{}", std::process::id()));
+        std::fs::create_dir_all(scratch.join("out")).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = SCModToolApp::new(None);
+        let wait = |app: &mut SCModToolApp, done: &dyn Fn(&SCModToolApp) -> bool| {
+            let started = Instant::now();
+            while !done(app) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(180),
+                    "timed out: {}",
+                    app.status.message
+                );
+                std::thread::sleep(Duration::from_millis(20));
+                app.handle_messages(&ctx);
+            }
+        };
+
+        app.open_root(&ctx, root.clone());
+        wait(&mut app, &|app| {
+            !app.discovering_languages && app.scan_cancel.is_none() && !app.banks.is_empty()
+        });
+        let bank_index = app
+            .banks
+            .iter()
+            .position(|bank| bank.sound_kind.is_none() && !bank.segments.is_empty())
+            .unwrap();
+        app.selected_bank = Some(bank_index);
+        let bank_path = app.banks[bank_index].path.clone();
+        let segment = app.banks[bank_index].segments[0].clone();
+
+        // Two seconds of a tone, in stereo at 44.1 kHz.
+        let source = scratch.join("tone.wav");
+        let tone = DecodedAudio {
+            samples: (0..88200)
+                .flat_map(|index| {
+                    let value = ((index as f64 / 15.0).sin() * 8000.0) as i16;
+                    [value, value]
+                })
+                .collect(),
+            sample_rate: 44100,
+            channels: 2,
+        };
+        tone.write_wav(std::fs::File::create(&source).unwrap())
+            .unwrap();
+
+        app.open_draft(&ctx, bank_path.clone(), segment.clone(), source);
+        wait(&mut app, &|app| {
+            app.draft.as_ref().is_some_and(|draft| !draft.is_busy())
+        });
+        let draft = app.draft.as_ref().unwrap();
+        assert_eq!(draft.error, None);
+        assert_eq!(draft.samples.as_ref().unwrap().len(), 72000);
+
+        app.set_draft_fit(FitOptions {
+            mode: sc_mod_tool_core::convert::FitMode::Stretch,
+            ..FitOptions::default()
+        });
+        app.apply_draft(&ctx);
+        wait(&mut app, &|app| {
+            app.draft.is_none() || app.draft.as_ref().unwrap().error.is_some()
+        });
+        assert!(
+            app.draft.is_none(),
+            "{:?}",
+            app.draft.as_ref().unwrap().error
+        );
+        let replacement = app.replacement(&bank_path, &segment.id).unwrap();
+        assert_eq!(replacement.sample_count, segment.sample_count);
+
+        app.start_save(&ctx, SaveTarget::Folder(scratch.join("out")), None);
+        wait(&mut app, &|app| !app.is_saving());
+        assert!(!app.status.is_error, "{}", app.status.message);
+        assert!(!app.edits.has_unsaved());
+
+        let sounds = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.file_name().unwrap().eq_ignore_ascii_case("sounds"))
+            .unwrap();
+        let original = std::fs::read(sounds.join(&bank_path)).unwrap();
+        let saved = std::fs::read(scratch.join("out/Sounds").join(&bank_path)).unwrap();
+        let (offset, length) = segment.stream_range().unwrap();
+        let range = offset as usize..(offset + length) as usize;
+        assert_eq!(saved.len(), original.len());
+        assert_ne!(saved[range.clone()], original[range.clone()]);
+        assert_eq!(saved[..range.start], original[..range.start]);
+        assert_eq!(saved[range.end..], original[range.end..]);
+        std::fs::remove_dir_all(&scratch).unwrap();
     }
 }
