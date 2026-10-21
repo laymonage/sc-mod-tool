@@ -11,11 +11,12 @@ use egui_material_icons::icons::{
     ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_STOP, ICON_WARNING,
 };
 use sc_mod_tool_core::{
-    Bank, Segment, SegmentSource,
+    Area, Bank, Segment, SegmentSource,
     subtitles::{MappingConfidence, Subtitle},
 };
 
 const NOT_SHOWN_IN_GAME: &str = "Not shown in game";
+const NOT_SHOWN_IN_GAME_HINT: &str = "The game plays this line without a subtitle.";
 const NO_TEXT: &str = "No text";
 const NO_TEXT_HINT: &str =
     "This line exists in its scene, but the game's localization files have no text for it.";
@@ -754,13 +755,21 @@ impl SCModToolApp {
                                                 format_bytes(byte_length)
                                             ),
                                         );
-                                        detail_row(ui, "Offset", offset.to_string());
+                                        detail_row(
+                                            ui,
+                                            "Offset",
+                                            RichText::new(offset.to_string()).monospace(),
+                                        );
                                     }
                                     SegmentSource::MapSound { subsong, key, .. } => {
                                         if let Some(name) = &segment.name {
                                             detail_row(ui, "Name", name.clone());
                                         }
-                                        detail_row(ui, "Key", format_key(key));
+                                        detail_row(
+                                            ui,
+                                            "Key",
+                                            RichText::new(format_key(key)).monospace(),
+                                        );
                                         detail_row(ui, "Map entry", subsong.to_string());
                                     }
                                 }
@@ -773,10 +782,22 @@ impl SCModToolApp {
                         if let SegmentSource::MapSound { areas, .. } = &segment.source {
                             ui.add_space(8.0);
                             ui.separator();
-                            ui.label(RichText::new("Used in").strong());
-                            for area in areas {
-                                ui.label(area);
-                            }
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Used in").strong());
+                                let count = match areas.len() {
+                                    1 => "1 area".to_owned(),
+                                    count => format!("{count} areas"),
+                                };
+                                ui.label(RichText::new(count).weak());
+                            });
+                            egui::Grid::new("used-in")
+                                .num_columns(2)
+                                .spacing([16.0, 4.0])
+                                .show(ui, |ui| {
+                                    for (group, areas) in area_groups(areas) {
+                                        detail_row(ui, group, areas.join(", "));
+                                    }
+                                });
                             if !self.subtitles.contains_key(&segment.id) {
                                 return;
                             }
@@ -788,14 +809,22 @@ impl SCModToolApp {
                             .get(&segment.id)
                             .map(Vec::as_slice)
                             .unwrap_or_default();
-                        ui.label(RichText::new("Subtitles").strong());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Subtitles").strong());
+                            if subtitles.len() > 1 {
+                                ui.label(
+                                    RichText::new(format!("{} entries", subtitles.len())).weak(),
+                                );
+                            }
+                        });
                         if subtitles.is_empty() {
                             ui.label(
                                 RichText::new("No subtitle is linked to this segment.").weak(),
                             );
                         }
+                        ui.add_space(2.0);
                         for (position, subtitle) in subtitles.iter().enumerate() {
-                            subtitle_card(ui, position, subtitle);
+                            subtitle_card(ui, &segment.id, position, subtitle);
                         }
                     });
             });
@@ -863,9 +892,12 @@ impl SCModToolApp {
                             .as_deref()
                             .is_some_and(|name| name.to_lowercase().contains(&query))
                             || format_key(*key).to_lowercase().contains(&query)
-                            || areas
-                                .iter()
-                                .any(|area| area.to_lowercase().contains(&query))
+                            || areas.iter().any(|area| {
+                                [Some(&area.name), area.mission_name.as_ref()]
+                                    .into_iter()
+                                    .flatten()
+                                    .any(|text| text.to_lowercase().contains(&query))
+                            })
                     }
                     SegmentSource::Stream { .. } => false,
                 };
@@ -1137,41 +1169,52 @@ fn is_shown_in_game(subtitle: &Subtitle) -> bool {
     subtitle.confidence == MappingConfidence::ExplicitCompiledReference
 }
 
-fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
+fn subtitle_card(ui: &mut egui::Ui, segment_id: &str, position: usize, subtitle: &Subtitle) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        // Read-only for now; editing subtitles will make this editable.
-        let mut text = subtitle.text.as_deref().unwrap_or_default();
-        ui.add(
-            egui::TextEdit::multiline(&mut text)
-                .hint_text("No text yet")
-                .desired_rows(2)
-                .desired_width(f32::INFINITY),
-        );
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&subtitle.cue).small().weak());
-            if !subtitle.has_text() {
-                ui.label(RichText::new(NO_TEXT).small().italics().weak())
-                    .on_hover_text(NO_TEXT_HINT);
-            }
-            if !is_shown_in_game(subtitle) {
-                ui.label(RichText::new(NOT_SHOWN_IN_GAME).small().italics().weak())
-                    .on_hover_text("The game plays this line without a subtitle. Its text is the line at the same position in the scene's localization section.");
-            }
+        // Read-only for now. Editing subtitles will make this a text field.
+        match &subtitle.text {
+            Some(text) => ui.add(egui::Label::new(text).wrap()),
+            None => ui
+                .label(RichText::new(NO_TEXT).italics().weak())
+                .on_hover_text(NO_TEXT_HINT),
+        };
+        ui.add_space(2.0);
+        // Keyed on the segment too, so expanding one segment's subtitle doesn't
+        // expand another's. Not on the cue: scenes reuse cue names, so one
+        // segment can have two lines with the same cue.
+        let id = ("subtitle", segment_id, position);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Cue").small().weak());
+            ui.label(RichText::new(&subtitle.cue).small());
         });
+        // Below the text rather than above it, so the text starts in the same
+        // place in every card.
+        if !is_shown_in_game(subtitle) {
+            badge(ui, NOT_SHOWN_IN_GAME).on_hover_text(NOT_SHOWN_IN_GAME_HINT);
+        }
         egui::CollapsingHeader::new(RichText::new("Where it comes from").small())
-            .id_salt(("subtitle-source", position))
+            .id_salt(("subtitle-source", id))
             .show(ui, |ui| {
-                egui::Grid::new(("subtitle-source-grid", position))
+                // Rows as tall as their small text, not a button.
+                egui::Grid::new(("subtitle-source-grid", id))
                     .num_columns(2)
-                    .spacing([12.0, 2.0])
+                    .min_row_height(0.0)
+                    .spacing([12.0, 4.0])
                     .show(ui, |ui| {
-                        detail_row(ui, "Sound", subtitle.sound_event.clone());
-                        detail_row(ui, "Map key", format!("0x{:08X}", subtitle.sound_map_key));
-                        ui.label(RichText::new("Script").weak());
+                        small_detail_row(ui, "Sound", RichText::new(&subtitle.sound_event));
+                        // Monospace like keys elsewhere, but small: `small()` and
+                        // `monospace()` are both text styles, so only one applies.
+                        small_detail_row(
+                            ui,
+                            "Map key",
+                            RichText::new(format!("0x{:08X}", subtitle.sound_map_key))
+                                .family(egui::FontFamily::Monospace),
+                        );
+                        ui.label(RichText::new("Script").small().weak());
                         ui.vertical(|ui| {
                             for source in &subtitle.sources {
-                                ui.label(RichText::new(source).small());
+                                ui.add(egui::Label::new(RichText::new(source).small()).wrap());
                             }
                         });
                         ui.end_row();
@@ -1180,10 +1223,51 @@ fn subtitle_card(ui: &mut egui::Ui, position: usize, subtitle: &Subtitle) {
             .header_response
             .on_hover_cursor(CursorIcon::PointingHand);
     });
-    ui.add_space(4.0);
+    ui.add_space(6.0);
 }
 
-fn detail_row(ui: &mut egui::Ui, name: &str, value: String) {
+/// A short status at the top of a card.
+fn badge(ui: &mut egui::Ui, text: &str) -> Response {
+    egui::Frame::new()
+        .fill(ui.visuals().widgets.inactive.weak_bg_fill)
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| ui.label(RichText::new(text).small()))
+        .response
+}
+
+/// A [`detail_row`] in small text, for details within a card.
+fn small_detail_row(ui: &mut egui::Ui, name: &str, value: RichText) {
+    ui.label(RichText::new(name).small().weak());
+    ui.add(egui::Label::new(value.small()).wrap());
+    ui.end_row();
+}
+
+/// A map sound's areas by mission, like the bank list: each run of levels
+/// with the same mission name, in the map's order, by their codes, then the
+/// areas that aren't levels, such as `menu`, by name.
+fn area_groups(areas: &[Area]) -> Vec<(&str, Vec<&str>)> {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut others = Vec::new();
+    for area in areas {
+        let (Some(mission), Some(code)) = (&area.mission_name, &area.code) else {
+            others.push(area.name.as_str());
+            continue;
+        };
+        // Missions with the same name, such as returning to a place, stay
+        // apart like they are in the bank list.
+        match groups.last_mut() {
+            Some((group, codes)) if group == mission => codes.push(code),
+            _ => groups.push((mission, vec![code])),
+        }
+    }
+    if !others.is_empty() {
+        groups.push(("Other", others));
+    }
+    groups
+}
+
+fn detail_row(ui: &mut egui::Ui, name: &str, value: impl Into<egui::WidgetText>) {
     ui.label(RichText::new(name).weak());
     ui.add(egui::Label::new(value).wrap());
     ui.end_row();
@@ -1373,6 +1457,46 @@ mod tests {
         assert_eq!(duration(119_960), "2:00.0");
         assert_eq!(duration(125_040), "2:05.0");
         assert_eq!(duration(3_599_960), "60:00.0");
+    }
+
+    #[test]
+    fn groups_areas_by_mission_like_the_bank_list() {
+        let area = |name: &str, code: Option<&str>, mission: Option<&str>| Area {
+            name: name.to_owned(),
+            code: code.map(str::to_owned),
+            mission_name: mission.map(str::to_owned),
+        };
+        let areas = [
+            area("fix", None, None),
+            area(
+                "4_1_1ChineseEmbassy",
+                Some("4_1_1"),
+                Some("Chinese Embassy"),
+            ),
+            area(
+                "4_1_2ChineseEmbassy",
+                Some("4_1_2"),
+                Some("Chinese Embassy"),
+            ),
+            area("4_2_1_Abattoir", Some("4_2_1"), Some("Abattoir")),
+            area(
+                "4_3_0ChineseEmbassy",
+                Some("4_3_0"),
+                Some("Chinese Embassy"),
+            ),
+            // A level without a name in the game's localization.
+            area("9_9_9Test", Some("9_9_9"), None),
+            area("menu", None, None),
+        ];
+        assert_eq!(
+            area_groups(&areas),
+            [
+                ("Chinese Embassy", vec!["4_1_1", "4_1_2"]),
+                ("Abattoir", vec!["4_2_1"]),
+                ("Chinese Embassy", vec!["4_3_0"]),
+                ("Other", vec!["fix", "9_9_9Test", "menu"]),
+            ]
+        );
     }
 
     fn bank(path: &str, map: Option<&str>, sound_kind: Option<SoundKind>) -> Bank {

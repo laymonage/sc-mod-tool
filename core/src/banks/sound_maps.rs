@@ -12,10 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::missions::mission_code;
+use super::missions::{leading_mission_code, mission_code};
 use crate::sounds_folder::find_file;
 use crate::vgmstream::{SharedFile, SoundInfo, Vgmstream};
-use crate::{Bank, Error, Segment, SegmentSource};
+use crate::{Area, Bank, Error, Segment, SegmentSource};
 
 /// The map files, relative to `Sounds`, that have the sounds for a language
 /// folder, such as `MAPS.SM0` and `ENGLISH/MAPS.LM0`.
@@ -137,6 +137,16 @@ pub(crate) fn read_map_banks(
     Ok(banks)
 }
 
+/// The area named `name`. Its mission name depends on the language, so it's
+/// added after the scan.
+fn area(name: &str) -> Area {
+    Area {
+        name: name.to_owned(),
+        code: leading_mission_code(name),
+        mission_name: None,
+    }
+}
+
 /// A map's sounds, in one list for each kind.
 ///
 /// Each of the map's areas lists every sound it plays, so most sounds are
@@ -171,9 +181,9 @@ impl SoundLists {
         {
             if let SegmentSource::MapSound { areas, .. } = &mut segments[*index].source
                 && !entry.area.is_empty()
-                && !areas.iter().any(|area| area == entry.area)
+                && !areas.iter().any(|area| area.name == entry.area)
             {
-                areas.push(entry.area.to_owned());
+                areas.push(area(entry.area));
             }
             return;
         }
@@ -192,7 +202,7 @@ impl SoundLists {
                 areas: [entry.area]
                     .into_iter()
                     .filter(|area| !area.is_empty())
-                    .map(str::to_owned)
+                    .map(area)
                     .collect(),
             },
             name: Some(name),
@@ -441,6 +451,13 @@ mod tests {
     }
 
     #[test]
+    fn reads_level_codes_from_area_names() {
+        assert_eq!(area("1_1_0Tbilisi").code.as_deref(), Some("1_1_0"));
+        assert_eq!(area("2_2_1_Kalinatek").code.as_deref(), Some("2_2_1"));
+        assert_eq!(area("menu").code, None);
+    }
+
+    #[test]
     fn lists_each_sound_once_with_the_areas_that_play_it() {
         let sound = |stream_name: &str, sample_count| SoundInfo {
             sample_count,
@@ -470,6 +487,7 @@ mod tests {
                 let SegmentSource::MapSound { areas, .. } = &segment.source else {
                     panic!("{} isn't a map sound", segment.id);
                 };
+                let areas: Vec<_> = areas.iter().map(|area| area.name.as_str()).collect();
                 (segment.segment, segment.id.as_str(), areas.join(","))
             })
             .collect();

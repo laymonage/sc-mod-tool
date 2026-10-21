@@ -14,7 +14,7 @@ use crate::sounds_folder::{
     LanguageFolder, find_sounds_directory, known_language, map_language_folders, read_directory,
     safe_child_path,
 };
-use crate::{Bank, Error, GameCache, Language};
+use crate::{Bank, Error, GameCache, Language, SegmentSource};
 use ls0::{collect_banks, read_bank};
 use missions::{leading_mission_code, mission_name, mission_names};
 
@@ -176,6 +176,16 @@ pub fn discover_banks_with_progress(
                 }
                 None => mission_name(&names, &bank.code),
             };
+            for segment in &mut bank.segments {
+                if let SegmentSource::MapSound { areas, .. } = &mut segment.source {
+                    for area in areas {
+                        area.mission_name = area
+                            .code
+                            .as_ref()
+                            .and_then(|code| mission_name(&names, code));
+                    }
+                }
+            }
             bank
         })
         .collect())

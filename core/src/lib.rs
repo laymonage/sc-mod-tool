@@ -96,10 +96,21 @@ pub enum SegmentSource {
         subsong: u32,
         /// The map's key for the sound, such as `0x00130086`.
         key: Option<u32>,
-        /// The map's areas that play the sound, such as `1_1_0Tbilisi`, one
-        /// for each level plus `fix` and `menu`.
-        areas: Vec<String>,
+        /// The map's areas that play the sound.
+        areas: Vec<Area>,
     },
+}
+
+/// One of a sound map's areas, such as `1_1_0Tbilisi`: one for each level,
+/// plus `fix` and `menu`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Area {
+    pub name: String,
+    /// The level's mission code, such as `1_1_0`, or `None` for an area that
+    /// isn't a level.
+    pub code: Option<String>,
+    /// The level's mission name, such as `Police Station`.
+    pub mission_name: Option<String>,
 }
 
 impl Segment {
