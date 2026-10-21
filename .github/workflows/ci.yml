@@ -32,7 +32,18 @@ jobs:
 
       - name: Install Linux packages
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential clang zlib1g-dev pkg-config libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang zlib1g-dev pkg-config libasound2-dev ffmpeg
+
+      # The conversion tests run FFmpeg. Linux gets it with the packages above.
+      - name: Install FFmpeg
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install ffmpeg
+          else
+            choco install ffmpeg --no-progress -y
+          fi
 
       - uses: actions/setup-dotnet@v6
         with:
@@ -69,6 +80,9 @@ jobs:
 
       - name: Rust tests
         run: cargo test --workspace
+        env:
+          # Fail rather than skip the tests that need FFmpeg.
+          SC_REQUIRE_FFMPEG: "1"
 
       - name: Bridge tests
         run: dotnet test core/uelib-bridge-tests

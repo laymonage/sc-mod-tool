@@ -1,4 +1,5 @@
 mod banks;
+pub mod convert;
 pub mod decoder;
 pub mod encoder;
 mod error;
