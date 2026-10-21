@@ -1,5 +1,5 @@
-//! An encoder for the mono 4-bit Ubisoft ADPCM streams in numeric `.LS0`
-//! banks, the format [`crate::decoder::decode`] reads.
+//! An encoder for the mono Ubisoft ADPCM streams in numeric `.LS0` banks,
+//! with 4-bit or 6-bit codes, the format [`crate::decoder::decode`] reads.
 //!
 //! A stream is a 0x30-byte header, then frames. Each frame holds the
 //! decoder's state (0x34 bytes) and up to two subframes of 1536 codes, the
@@ -7,6 +7,7 @@
 //! `ubi_adpcm_decoder.c`, which this follows exactly; the code search is
 //! adapted from previous research done in DecUbiSnd.
 
+use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::Error;
@@ -15,7 +16,10 @@ pub const STREAM_HEADER_SIZE: usize = 0x30;
 const STATE_SIZE: usize = 0x34;
 const CODES_PER_SUBFRAME: u32 = 1536;
 const SUBFRAMES_PER_FRAME: u32 = 2;
-const BITS_PER_CODE: u32 = 4;
+/// How many sequences of codes [`search`] keeps. Wider beams gain little more
+/// on speech but take longer: this encodes 4-bit streams about 30 times faster
+/// than they play, and 6-bit ones 15 times, in a release build.
+const BEAM_WIDTH: usize = 4;
 
 /// A stream's header, kept whole so that fields nobody understands, such as
 /// `+0x1C`, are written back as they were.
@@ -23,8 +27,8 @@ const BITS_PER_CODE: u32 = 4;
 pub struct StreamHeader([u8; STREAM_HEADER_SIZE]);
 
 impl StreamHeader {
-    /// Reads the header at the start of `stream`, which must be a mono 4-bit
-    /// stream.
+    /// Reads the header at the start of `stream`, which must be a mono
+    /// stream with 4-bit or 6-bit codes.
     pub fn parse(stream: &[u8]) -> Result<Self, Error> {
         let bytes: [u8; STREAM_HEADER_SIZE] = stream
             .get(..STREAM_HEADER_SIZE)
@@ -38,8 +42,7 @@ impl StreamHeader {
             return Err("Only mono streams can be replaced.".into());
         }
         match header.field(0x24) {
-            4 => Ok(header),
-            6 => Err("Streams with 6-bit codes can't be replaced yet.".into()),
+            4 | 6 => Ok(header),
             bits => Err(format!("Streams with {bits}-bit codes aren't supported.").into()),
         }
     }
@@ -56,6 +59,28 @@ impl StreamHeader {
         }
     }
 
+    /// The length of a stream like this one with `sample_count` samples,
+    /// without the padding that banks add after it.
+    pub fn stream_length(&self, sample_count: u32) -> usize {
+        let width = self.width();
+        let mut length = STREAM_HEADER_SIZE;
+        for (index, codes) in subframe_code_counts(sample_count).enumerate() {
+            if index % SUBFRAMES_PER_FRAME as usize == 0 {
+                length += STATE_SIZE;
+            }
+            length += subframe_length(codes, width);
+        }
+        length
+    }
+
+    fn width(&self) -> Width {
+        if self.field(0x24) == 6 {
+            Width::Six
+        } else {
+            Width::Four
+        }
+    }
+
     fn field(&self, offset: usize) -> u32 {
         u32::from_le_bytes(self.0[offset..offset + 4].try_into().unwrap())
     }
@@ -65,17 +90,37 @@ impl StreamHeader {
     }
 }
 
-/// The length of a stream of `sample_count` samples, without the padding
-/// that banks add after it.
-pub fn stream_length(sample_count: u32) -> usize {
-    let mut length = STREAM_HEADER_SIZE;
-    for (index, codes) in subframe_code_counts(sample_count).enumerate() {
-        if index % SUBFRAMES_PER_FRAME as usize == 0 {
-            length += STATE_SIZE;
+/// The size of a stream's codes, each with its own decoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Width {
+    Four,
+    Six,
+}
+
+impl Width {
+    fn bits(self) -> u32 {
+        match self {
+            Width::Four => 4,
+            Width::Six => 6,
         }
-        length += subframe_length(codes);
     }
-    length
+
+    /// The codes the encoder may choose: those the game's files use, so that
+    /// a replacement uses nothing the game's own audio doesn't.
+    ///
+    /// The codes left out of each width are those vgmstream marks as
+    /// unexpected. 4-bit code 15 and 6-bit code 63 reach steps past the end
+    /// of their decoder's tables. 6-bit codes 0 and 62 reach step 31, which
+    /// makes the largest change but then shrinks the step. Choosing the
+    /// nearest code for each sample in turn, the encoder kept picking them
+    /// and fell behind the input; a beam search might use them well, but
+    /// that isn't needed.
+    fn codes(self) -> RangeInclusive<u8> {
+        match self {
+            Width::Four => 0..=14,
+            Width::Six => 1..=61,
+        }
+    }
 }
 
 /// Encodes `samples` as a stream, with `template`'s header updated for their
@@ -99,6 +144,7 @@ fn encode(
         .ok()
         .filter(|count| *count > 0)
         .ok_or("A stream needs at least one sample, and fewer than 2³² of them.")?;
+    let width = template.width();
     let subframe_count = sample_count.div_ceil(CODES_PER_SUBFRAME);
     let mut header = template.clone();
     header.set_field(0x04, sample_count);
@@ -109,12 +155,11 @@ fn encode(
     );
     header.set_field(0x10, CODES_PER_SUBFRAME);
 
-    let mut stream = Vec::with_capacity(stream_length(sample_count));
+    let mut stream = Vec::with_capacity(header.stream_length(sample_count));
     stream.extend_from_slice(&header.0);
     let mut decoded = Vec::with_capacity(samples.len());
     let mut state = State::INITIAL;
     let mut remaining = samples;
-    let mut codes = Vec::with_capacity(CODES_PER_SUBFRAME as usize);
     for (index, count) in subframe_code_counts(sample_count).enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
@@ -124,16 +169,11 @@ fn encode(
         }
         let (subframe, rest) = remaining.split_at(count as usize);
         remaining = rest;
-        codes.clear();
-        for &sample in subframe {
-            let (code, next, output) = best_code(&state, sample);
-            codes.push(code);
-            state = next;
-            decoded.push(output);
-        }
-        pack_codes(&codes, &mut stream);
+        let codes = search(&state, subframe, width);
+        decoded.extend(codes.iter().map(|&code| state.expand(code, width)));
+        pack_codes(&codes, width, &mut stream);
     }
-    debug_assert_eq!(stream.len(), stream_length(sample_count));
+    debug_assert_eq!(stream.len(), header.stream_length(sample_count));
     Ok((stream, decoded))
 }
 
@@ -146,50 +186,121 @@ fn subframe_code_counts(sample_count: u32) -> impl Iterator<Item = u32> {
 }
 
 /// A subframe's length, which the decoder works out as one byte more than
-/// its codes need.
-fn subframe_length(code_count: u32) -> usize {
-    (code_count * BITS_PER_CODE / 8 + 1) as usize
+/// the whole bytes its codes fill.
+fn subframe_length(code_count: u32, width: Width) -> usize {
+    (code_count * width.bits() / 8 + 1) as usize
 }
 
-/// The code whose decoded sample is nearest `sample`, with the state and
-/// sample it leads to. Code 15 can't be used: the decoder's tables have no
-/// step for it (see [`State::expand`]).
-fn best_code(state: &State, sample: i16) -> (u8, State, i16) {
-    let mut best = None;
-    let mut best_error = u64::MAX;
-    for code in 0..15 {
-        let mut candidate = *state;
-        let output = candidate.expand(code);
-        let difference = i64::from(sample) - i64::from(output);
-        let error = difference.unsigned_abs().pow(2);
-        if error < best_error {
-            best_error = error;
-            best = Some((code, candidate, output));
-        }
+/// Chooses codes for `samples`, starting from `state`, with a beam search:
+/// after each sample, it keeps the [`BEAM_WIDTH`] sequences of codes that
+/// decode nearest the samples so far. Picking the nearest code for each
+/// sample in turn does worse, as a code also changes how later ones decode:
+/// on speech, by about 2 dB of signal-to-noise ratio for 4-bit codes and 7 dB
+/// for 6-bit ones, whose decoder carries each change into the next sample.
+fn search(state: &State, samples: &[i16], width: Width) -> Vec<u8> {
+    struct Path {
+        state: State,
+        error: u64,
+        node: u32,
     }
-    best.unwrap()
+    struct Candidate {
+        state: State,
+        error: u64,
+        path: usize,
+        code: u8,
+    }
+    const ROOT: u32 = u32::MAX;
+
+    // Each path's codes, as a tree of (parent, code) pairs.
+    let mut nodes: Vec<(u32, u8)> = Vec::with_capacity(samples.len() * BEAM_WIDTH);
+    let mut paths = vec![Path {
+        state: *state,
+        error: 0,
+        node: ROOT,
+    }];
+    let mut next_paths = Vec::with_capacity(BEAM_WIDTH);
+    let mut candidates = Vec::with_capacity(BEAM_WIDTH * width.codes().len());
+    for &sample in samples {
+        candidates.clear();
+        for (index, path) in paths.iter().enumerate() {
+            for code in width.codes() {
+                let mut state = path.state;
+                let output = state.expand(code, width);
+                let difference = i64::from(sample) - i64::from(output);
+                candidates.push(Candidate {
+                    state,
+                    error: path.error + difference.unsigned_abs().pow(2),
+                    path: index,
+                    code,
+                });
+            }
+        }
+        // Paths that reach the same state have the same future, so only the
+        // better of them is kept, and a few spares are sorted in case.
+        let shortlist = (BEAM_WIDTH * 2).min(candidates.len());
+        if shortlist < candidates.len() {
+            candidates.select_nth_unstable_by_key(shortlist, |candidate| candidate.error);
+        }
+        let shortlist = &mut candidates[..shortlist];
+        shortlist.sort_unstable_by_key(|candidate| candidate.error);
+        next_paths.clear();
+        for candidate in shortlist.iter() {
+            if next_paths
+                .iter()
+                .any(|path: &Path| path.state == candidate.state)
+            {
+                continue;
+            }
+            nodes.push((paths[candidate.path].node, candidate.code));
+            next_paths.push(Path {
+                state: candidate.state,
+                error: candidate.error,
+                node: nodes.len() as u32 - 1,
+            });
+            if next_paths.len() == BEAM_WIDTH {
+                break;
+            }
+        }
+        std::mem::swap(&mut paths, &mut next_paths);
+    }
+
+    let mut codes = vec![0; samples.len()];
+    let mut node = paths[0].node;
+    for code in codes.iter_mut().rev() {
+        let (parent, value) = nodes[node as usize];
+        *code = value;
+        node = parent;
+    }
+    codes
 }
 
 /// Packs a subframe's codes into `output`.
 ///
-/// The decoder reads codes from 32-bit little-endian words, most significant
-/// first. A subframe that ends partway through a word only has
-/// [`subframe_length`] bytes of it, and the game's files write those like
-/// this, every one checked: when the whole word fits, it's written as usual
-/// with the unused codes zero; otherwise the codes are written in order, two
-/// to a byte, high nibble first. vgmstream reads the latter as a whole word
-/// anyway, so up to five samples at the very end of a stream decode
-/// differently there.
-fn pack_codes(codes: &[u8], output: &mut Vec<u8>) {
-    let (words, tail) = codes.as_chunks::<8>();
-    for word in words {
-        output.extend_from_slice(&code_word(word).to_le_bytes());
+/// The decoder reads the codes as one stream of bits, most significant first,
+/// from 32-bit little-endian words; 6-bit codes can span two words. A
+/// subframe that ends partway through a word only has [`subframe_length`]
+/// bytes of it, and the game's files write those like this, every one
+/// checked: when the whole word fits, it's written as usual with the unused
+/// bits zero; otherwise the bits are written in order, high bits first.
+/// vgmstream reads the latter as a whole word anyway, so the last few samples
+/// of such a stream decode differently there.
+fn pack_codes(codes: &[u8], width: Width, output: &mut Vec<u8>) {
+    let bits = width.bits();
+    let mut pending = 0_u64;
+    let mut pending_bits = 0;
+    for &code in codes {
+        pending = (pending << bits) | u64::from(code);
+        pending_bits += bits;
+        if pending_bits >= 32 {
+            pending_bits -= 32;
+            output.extend_from_slice(&((pending >> pending_bits) as u32).to_le_bytes());
+            pending &= (1 << pending_bits) - 1;
+        }
     }
-    let tail_length = subframe_length(codes.len() as u32) - codes.len() / 8 * 4;
+    let code_bits = codes.len() as u32 * bits;
+    let tail_length = subframe_length(codes.len() as u32, width) - (code_bits / 32 * 4) as usize;
     // Without a partial word, this is just the padding byte.
-    let word = code_word(tail)
-        .checked_shl((8 - tail.len() as u32) * 4)
-        .unwrap_or(0);
+    let word = (pending << (32 - pending_bits)) as u32;
     if tail_length == 4 {
         output.extend_from_slice(&word.to_le_bytes());
     } else {
@@ -197,13 +308,8 @@ fn pack_codes(codes: &[u8], output: &mut Vec<u8>) {
     }
 }
 
-fn code_word(codes: &[u8]) -> u32 {
-    codes
-        .iter()
-        .fold(0, |word, &code| (word << 4) | u32::from(code))
-}
-
 /// The decoder's state for one channel, as stored at the start of each frame.
+/// The 6-bit decoder only uses the step, `hist1` and the latest delta.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct State {
     step1: i32,
@@ -217,8 +323,22 @@ struct State {
     deltas: [i16; 5],
 }
 
-const TABLE1: [i32; 8] = [-100000000, 8, 269, 425, 545, 645, 745, 850];
-const TABLE2: [i32; 8] = [-1536, 2314, 5243, 8192, 14336, 25354, 45445, 143626];
+const TABLE1_4: [i32; 8] = [-100000000, 8, 269, 425, 545, 645, 745, 850];
+const TABLE2_4: [i32; 8] = [-1536, 2314, 5243, 8192, 14336, 25354, 45445, 143626];
+#[rustfmt::skip]
+const TABLE1_6: [i32; 32] = [
+    -100000000, -369, -245, -133, -33, 56, 135, 207,
+    275, 338, 395, 448, 499, 548, 593, 635,
+    676, 717, 755, 791, 825, 858, 889, 919,
+    948, 975, 1003, 1029, 1054, 1078, 1103, 1132,
+];
+#[rustfmt::skip]
+const TABLE2_6: [i32; 32] = [
+    1800, 1800, 1800, 2048, 3072, 4096, 5000, 5056,
+    5184, 5240, 6144, 6880, 9624, 12880, 14952, 18040,
+    20480, 22920, 25600, 28040, 32560, 35840, 40960, 45832,
+    51200, 56320, 63488, 67704, 75776, 89088, 102400, 0,
+];
 #[rustfmt::skip]
 const DELTA_TABLE: [i32; 66] = [
     1024, 1031, 1053, 1076, 1099, 1123, 1148, 1172,
@@ -295,24 +415,26 @@ impl State {
     }
 
     /// Decodes `code`, updating the state. This is vgmstream's
-    /// `expand_code_4bit`, with C's wrapping 32-bit arithmetic.
+    /// `expand_code_4bit` or `expand_code_6bit`, with C's wrapping 32-bit
+    /// arithmetic.
     ///
-    /// `code` must be below 15. vgmstream's tables have junk past step 7,
-    /// which code 15 would reach, and these copies leave it out.
-    fn expand(&mut self, code: u8) -> i16 {
-        debug_assert!(code < 15, "code {code} has no step");
+    /// vgmstream's tables have junk past step 7 for 4-bit codes and step 31
+    /// for 6-bit ones, and these copies leave it out, so 4-bit code 15 and
+    /// 6-bit code 63 can't be decoded.
+    fn expand(&mut self, code: u8, width: Width) -> i16 {
+        debug_assert!(code < (1 << width.bits()) - 1, "code {code} has no step");
+        match width {
+            Width::Four => self.expand_4bit(code),
+            Width::Six => self.expand_6bit(code),
+        }
+    }
+
+    fn expand_4bit(&mut self, code: u8) -> i16 {
         let code_signed = i32::from(code) - 7;
         let step_index = code_signed.unsigned_abs() as usize;
-        let step_next = TABLE1[step_index].wrapping_add(self.step1);
-        let step = (((self.step1 & 0xFFFF) * 246 + TABLE2[step_index]) >> 8).clamp(271, 2560);
-
-        let mut delta = 0;
-        if ((step_next as u32 & 0xFFFF_FF00).wrapping_sub(1) & 0x8000_0000) == 0 {
-            let delta_index =
-                ((step_next >> 3) & 0x1F) as usize + if code_signed < 0 { 33 } else { 0 };
-            let delta_shift = ((step_next >> 8) & 0xFF).clamp(0, 31) as u32;
-            delta = DELTA_TABLE[delta_index].wrapping_shl(delta_shift) >> 10;
-        }
+        let step_next = TABLE1_4[step_index].wrapping_add(self.step1);
+        let step = self.next_step(TABLE2_4[step_index]);
+        let delta = step_delta(step_next, code_signed < 0);
 
         let [mod1, mod2, mod3, mod4] = self.mods.map(i32::from);
         let [delta1, delta2, delta3, delta4, _] = self.deltas.map(i32::from);
@@ -364,6 +486,36 @@ impl State {
         }
         sample
     }
+
+    fn expand_6bit(&mut self, code: u8) -> i16 {
+        let code_signed = i32::from(code) - 31;
+        let step_index = code_signed.unsigned_abs() as usize;
+        let step_next = TABLE1_6[step_index].wrapping_add(self.step1);
+        let step = self.next_step(TABLE2_6[step_index]);
+        let delta = step_delta(step_next, code_signed < 0);
+
+        let sample = delta
+            .wrapping_add(i32::from(self.deltas[0]))
+            .wrapping_add(i32::from(self.hist1)) as i16;
+        self.hist1 = sample;
+        self.step1 = step;
+        self.deltas[0] = delta as i16;
+        sample
+    }
+
+    fn next_step(&self, adjustment: i32) -> i32 {
+        (((self.step1 & 0xFFFF) * 246 + adjustment) >> 8).clamp(271, 2560)
+    }
+}
+
+/// The change a code makes, from its step and sign.
+fn step_delta(step_next: i32, negative: bool) -> i32 {
+    if ((step_next as u32 & 0xFFFF_FF00).wrapping_sub(1) & 0x8000_0000) != 0 {
+        return 0;
+    }
+    let index = ((step_next >> 3) & 0x1F) as usize + if negative { 33 } else { 0 };
+    let shift = ((step_next >> 8) & 0xFF).clamp(0, 31) as u32;
+    DELTA_TABLE[index].wrapping_shl(shift) >> 10
 }
 
 fn sign(value: i32) -> i32 {
@@ -390,15 +542,21 @@ mod tests {
     use super::*;
     use crate::decoder;
 
-    fn template() -> StreamHeader {
+    const WIDTHS: [Width; 2] = [Width::Four, Width::Six];
+
+    fn template(width: Width) -> StreamHeader {
         let mut bytes = [0; STREAM_HEADER_SIZE];
+        let (bits, unknown28) = match width {
+            Width::Four => (4, 1),
+            Width::Six => (6, 3),
+        };
         for (offset, value) in [
             (0x00, 8_u32),
             (0x14, 2),
             (0x18, 36000),
             (0x1C, 0x0123_4567),
-            (0x24, 4),
-            (0x28, 1),
+            (0x24, bits),
+            (0x28, unknown28),
             (0x2C, 1),
         ] {
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -439,11 +597,19 @@ mod tests {
     }
 
     /// How many samples at the end of a stream of `sample_count` samples
-    /// vgmstream reads differently from the game's layout; see [`pack_codes`].
-    fn unreliable_tail(sample_count: u32) -> usize {
-        match sample_count % CODES_PER_SUBFRAME % 8 {
-            tail @ 1..=5 => tail as usize,
-            _ => 0,
+    /// vgmstream reads differently from the game's layout: those with bits in
+    /// a last partial word too short to be read as one (see [`pack_codes`]).
+    fn unreliable_tail(sample_count: u32, width: Width) -> usize {
+        let last = match sample_count % CODES_PER_SUBFRAME {
+            0 => CODES_PER_SUBFRAME,
+            last => last,
+        };
+        let bits = last * width.bits();
+        let whole_words = bits / 32;
+        if bits.is_multiple_of(32) || subframe_length(last, width) - whole_words as usize * 4 == 4 {
+            0
+        } else {
+            (last - whole_words * 32 / width.bits()) as usize
         }
     }
 
@@ -463,23 +629,27 @@ mod tests {
     #[test]
     fn vgmstream_decodes_what_the_encoder_expects() {
         let cancelled = AtomicBool::new(false);
-        for length in [
-            1, 2, 5, 6, 7, 8, 9, 13, 1535, 1536, 1537, 3072, 3073, 4609, 10_000,
-        ] {
-            for (name, samples) in signals(length) {
-                let (stream, expected) = encode(&template(), &samples, &cancelled).unwrap();
-                assert_eq!(
-                    stream.len(),
-                    stream_length(length as u32),
-                    "{name} × {length}"
-                );
-                let decoded = decoder::decode(&stream, length as u32, &cancelled).unwrap();
-                let compared = length - unreliable_tail(length as u32);
-                assert_eq!(
-                    decoded.samples[..compared],
-                    expected[..compared],
-                    "{name} × {length}"
-                );
+        for width in WIDTHS {
+            let template = template(width);
+            for length in [
+                1, 2, 5, 6, 7, 8, 9, 13, 16, 21, 22, 1535, 1536, 1537, 3072, 3073, 4609, 10_000,
+            ] {
+                for (name, samples) in signals(length) {
+                    let context = format!("{width:?}, {name} × {length}");
+                    let (stream, expected) = encode(&template, &samples, &cancelled).unwrap();
+                    assert_eq!(
+                        stream.len(),
+                        template.stream_length(length as u32),
+                        "{context}"
+                    );
+                    let decoded = decoder::decode(&stream, length as u32, &cancelled).unwrap();
+                    let compared = length - unreliable_tail(length as u32, width);
+                    assert_eq!(
+                        decoded.samples[..compared],
+                        expected[..compared],
+                        "{context}"
+                    );
+                }
             }
         }
     }
@@ -487,17 +657,24 @@ mod tests {
     #[test]
     fn encoded_streams_sound_like_their_input() {
         let cancelled = AtomicBool::new(false);
-        // A full-scale square wave is beyond what four bits can follow, so
-        // it's only used to check that the encoder and decoder agree.
-        for (name, minimum) in [("sine", 40.0), ("noise", 15.0)] {
+        // A full-scale square wave is beyond what these codes can follow, so
+        // it's only used to check that the encoder and decoder agree. The 6-bit
+        // decoder carries each change into the next sample, which suits speech
+        // but not white noise.
+        for (width, name, minimum) in [
+            (Width::Four, "sine", 45.0),
+            (Width::Four, "noise", 15.0),
+            (Width::Six, "sine", 50.0),
+            (Width::Six, "noise", 6.0),
+        ] {
             let samples = signals(36000)
                 .into_iter()
                 .find_map(|(signal, samples)| (signal == name).then_some(samples))
                 .unwrap();
-            let stream = encode_stream(&template(), &samples, &cancelled).unwrap();
+            let stream = encode_stream(&template(width), &samples, &cancelled).unwrap();
             let decoded = decoder::decode(&stream, 36000, &cancelled).unwrap();
             let quality = snr(&samples, &decoded.samples);
-            assert!(quality > minimum, "{name}: SNR {quality:.1} dB");
+            assert!(quality > minimum, "{width:?}, {name}: SNR {quality:.1} dB");
         }
     }
 
@@ -505,106 +682,135 @@ mod tests {
     fn banks_find_encoded_streams() {
         let cancelled = AtomicBool::new(false);
         let samples = &signals(5000)[2].1;
-        let stream = encode_stream(&template(), samples, &cancelled).unwrap();
-        let mut bank = stream.clone();
-        bank.resize(bank.len().next_multiple_of(4), 0);
-        bank.extend_from_slice(&stream);
-        let segments = crate::banks::scan_ls0(&bank, "ENGLISH/1_1_0.LS0", &cancelled).unwrap();
-        let second = bank.len() - stream.len();
-        let ranges: Vec<_> = segments
-            .iter()
-            .map(|segment| segment.stream_range())
-            .collect();
-        assert_eq!(
-            ranges,
-            [
-                Some((0, stream.len() as u64)),
-                Some((second as u64, stream.len() as u64))
-            ]
-        );
-        assert!(segments.iter().all(|segment| segment.sample_count == 5000));
+        for width in WIDTHS {
+            let stream = encode_stream(&template(width), samples, &cancelled).unwrap();
+            let mut bank = stream.clone();
+            bank.resize(bank.len().next_multiple_of(4), 0);
+            bank.extend_from_slice(&stream);
+            let segments = crate::banks::scan_ls0(&bank, "ENGLISH/1_1_0.LS0", &cancelled).unwrap();
+            let second = bank.len() - stream.len();
+            let ranges: Vec<_> = segments
+                .iter()
+                .map(|segment| segment.stream_range())
+                .collect();
+            assert_eq!(
+                ranges,
+                [
+                    Some((0, stream.len() as u64)),
+                    Some((second as u64, stream.len() as u64))
+                ],
+                "{width:?}"
+            );
+            assert!(segments.iter().all(|segment| segment.sample_count == 5000));
+        }
     }
 
     #[test]
     fn headers_keep_the_template_and_describe_the_samples() {
         let cancelled = AtomicBool::new(false);
-        let stream = encode_stream(&template(), &[0; 3100], &cancelled).unwrap();
-        let header = StreamHeader::parse(&stream).unwrap();
-        assert_eq!(header.sample_count(), 3100);
-        assert_eq!(header.field(0x08), 3);
-        assert_eq!(header.field(0x0C), 28);
-        assert_eq!(header.field(0x10), 1536);
-        assert_eq!(header.sample_rate(), 36000);
-        assert_eq!(header.field(0x1C), 0x0123_4567);
-        assert_eq!(header.field(0x28), 1);
-        // Frames start with the state's signature.
-        assert_eq!(
-            stream[STREAM_HEADER_SIZE..STREAM_HEADER_SIZE + 4],
-            2_u32.to_le_bytes()
-        );
+        for width in WIDTHS {
+            let stream = encode_stream(&template(width), &[0; 3100], &cancelled).unwrap();
+            let header = StreamHeader::parse(&stream).unwrap();
+            assert_eq!(header.sample_count(), 3100);
+            assert_eq!(header.field(0x08), 3);
+            assert_eq!(header.field(0x0C), 28);
+            assert_eq!(header.field(0x10), 1536);
+            assert_eq!(header.sample_rate(), 36000);
+            assert_eq!(header.field(0x1C), 0x0123_4567);
+            assert_eq!(header.width(), width);
+            assert_eq!(header.field(0x28), template(width).field(0x28));
+            // Frames start with the state's signature.
+            assert_eq!(
+                stream[STREAM_HEADER_SIZE..STREAM_HEADER_SIZE + 4],
+                2_u32.to_le_bytes()
+            );
+        }
     }
 
     #[test]
     fn partial_words_follow_the_games_layout() {
         let codes = [1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let packed = |count: usize| {
+        let packed = |count: usize, width: Width| {
             let mut output = Vec::new();
-            pack_codes(&codes[..count], &mut output);
+            pack_codes(&codes[..count], width, &mut output);
             output
         };
-        assert_eq!(packed(8), [0x78, 0x56, 0x34, 0x12, 0x00]);
-        assert_eq!(packed(1), [0x10]);
-        assert_eq!(packed(2), [0x12, 0x00]);
-        assert_eq!(packed(3), [0x12, 0x30]);
-        assert_eq!(packed(5), [0x12, 0x34, 0x50]);
-        assert_eq!(packed(6), [0x00, 0x56, 0x34, 0x12]);
-        assert_eq!(packed(7), [0x70, 0x56, 0x34, 0x12]);
-        assert_eq!(packed(9), [0x78, 0x56, 0x34, 0x12, 0x90]);
+        assert_eq!(packed(8, Width::Four), [0x78, 0x56, 0x34, 0x12, 0x00]);
+        assert_eq!(packed(1, Width::Four), [0x10]);
+        assert_eq!(packed(2, Width::Four), [0x12, 0x00]);
+        assert_eq!(packed(3, Width::Four), [0x12, 0x30]);
+        assert_eq!(packed(5, Width::Four), [0x12, 0x34, 0x50]);
+        assert_eq!(packed(6, Width::Four), [0x00, 0x56, 0x34, 0x12]);
+        assert_eq!(packed(7, Width::Four), [0x70, 0x56, 0x34, 0x12]);
+        assert_eq!(packed(9, Width::Four), [0x78, 0x56, 0x34, 0x12, 0x90]);
+
+        // 000001 000010 000011 000100 000101 000110 …
+        assert_eq!(packed(1, Width::Six), [0b0000_0100]);
+        assert_eq!(packed(2, Width::Six), [0b0000_0100, 0b0010_0000]);
+        assert_eq!(packed(5, Width::Six), [0x14, 0xC4, 0x20, 0x04]);
+        // The sixth code spans the first word and the next.
+        assert_eq!(packed(6, Width::Six), [0x14, 0xC4, 0x20, 0x04, 0b0110_0000]);
     }
 
     #[test]
     fn rejects_streams_it_cannot_write() {
         let cancelled = AtomicBool::new(false);
-        assert!(encode_stream(&template(), &[], &cancelled).is_err());
+        assert!(encode_stream(&template(Width::Four), &[], &cancelled).is_err());
 
-        let mut six_bit = template().0;
-        six_bit[0x24] = 6;
-        assert!(StreamHeader::parse(&six_bit).is_err());
-        let mut stereo = template().0;
+        let mut five_bit = template(Width::Four).0;
+        five_bit[0x24] = 5;
+        assert!(StreamHeader::parse(&five_bit).is_err());
+        let mut stereo = template(Width::Six).0;
         stereo[0x2C] = 2;
         assert!(StreamHeader::parse(&stereo).is_err());
         assert!(StreamHeader::parse(&[8, 0, 0, 0]).is_err());
 
         cancelled.store(true, Ordering::Relaxed);
         assert_eq!(
-            encode_stream(&template(), &[0; 10], &cancelled),
+            encode_stream(&template(Width::Four), &[0; 10], &cancelled),
             Err(Error::Cancelled)
         );
     }
 
     /// Unpacks a subframe's codes the way the game's files lay them out.
-    fn unpack_codes(bytes: &[u8], count: usize) -> Vec<u8> {
-        let mut codes = Vec::with_capacity(count);
-        for &word in bytes[..count / 8 * 4].as_chunks::<4>().0 {
-            let word = u32::from_le_bytes(word);
-            codes.extend((0..8).rev().map(|index| (word >> (index * 4)) as u8 & 0xF));
-        }
-        let tail = &bytes[count / 8 * 4..];
-        let word = if tail.len() == 4 {
+    fn unpack_codes(bytes: &[u8], count: usize, width: Width) -> Vec<u8> {
+        let bits = width.bits();
+        let whole_words = count * bits as usize / 32;
+        let mut words: Vec<u32> = bytes[..whole_words * 4]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&word| u32::from_le_bytes(word))
+            .collect();
+        let tail = &bytes[whole_words * 4..];
+        words.push(if tail.len() == 4 {
             u32::from_le_bytes(tail.try_into().unwrap())
         } else {
             let mut word = [0; 4];
             word[..tail.len()].copy_from_slice(tail);
             u32::from_be_bytes(word)
-        };
-        codes.extend((0..count % 8).map(|index| (word >> (28 - index * 4)) as u8 & 0xF));
+        });
+
+        let mut words = words.into_iter();
+        let mut codes = Vec::with_capacity(count);
+        let mut pending = 0_u64;
+        let mut pending_bits = 0;
+        while codes.len() < count {
+            if pending_bits < bits {
+                pending = (pending << 32) | u64::from(words.next().unwrap());
+                pending_bits += 32;
+            }
+            pending_bits -= bits;
+            codes.push((pending >> pending_bits) as u8 & ((1 << bits) - 1));
+            pending &= (1 << pending_bits) - 1;
+        }
         codes
     }
 
-    /// Checks the encoder against every mono 4-bit stream in the game:
-    /// decoding a stream's codes from its own states matches vgmstream,
-    /// packing them and its states again gives the same bytes, and encoding its
-    /// audio again gives a stream of the same layout that sounds nearly the same.
+    /// Checks the encoder against every mono stream in the game: decoding a
+    /// stream's codes from its own states matches vgmstream, packing them and
+    /// its states again gives the same bytes, and encoding its audio again
+    /// gives a stream of the same layout that sounds nearly the same.
     #[test]
     #[ignore = "requires local Splinter Cell game files; set SC1_GAME_DIR"]
     fn matches_every_game_stream() {
@@ -615,7 +821,7 @@ mod tests {
             });
         let cancelled = AtomicBool::new(false);
         let mut cache = crate::GameCache::default();
-        let mut checked = 0;
+        let mut checked = [0; 2];
         for language in crate::discover_languages(&game_root).unwrap() {
             let banks = crate::discover_banks_with_progress(
                 &game_root,
@@ -632,9 +838,8 @@ mod tests {
                     };
                     let original =
                         crate::read_segment(&game_root, &bank.path, offset, length).unwrap();
-                    let Ok(template) = StreamHeader::parse(&original) else {
-                        continue;
-                    };
+                    let template = StreamHeader::parse(&original).unwrap();
+                    let width = template.width();
                     let id = &segment.id;
                     let sample_count = template.sample_count();
                     let reference = decoder::decode(&original, sample_count, &cancelled)
@@ -652,15 +857,18 @@ mod tests {
                             state.write(&mut repacked);
                             position += STATE_SIZE;
                         }
-                        let size = subframe_length(count);
-                        let codes =
-                            unpack_codes(&original[position..position + size], count as usize);
-                        decoded.extend(codes.iter().map(|&code| state.expand(code)));
-                        pack_codes(&codes, &mut repacked);
+                        let size = subframe_length(count, width);
+                        let codes = unpack_codes(
+                            &original[position..position + size],
+                            count as usize,
+                            width,
+                        );
+                        decoded.extend(codes.iter().map(|&code| state.expand(code, width)));
+                        pack_codes(&codes, width, &mut repacked);
                         position += size;
                     }
                     assert_eq!(repacked, original, "{id}: repacked codes differ");
-                    let compared = reference.len() - unreliable_tail(sample_count);
+                    let compared = reference.len() - unreliable_tail(sample_count, width);
                     assert_eq!(
                         decoded[..compared],
                         reference[..compared],
@@ -678,12 +886,22 @@ mod tests {
                         .unwrap()
                         .samples;
                     let quality = snr(&reference, &reencoded);
-                    assert!(quality > 35.0, "{id}: re-encoded at {quality:.1} dB SNR");
-                    checked += 1;
+                    // The worst in the game are about 44 dB for 4-bit and 32 dB for
+                    // 6-bit.
+                    let minimum = match width {
+                        Width::Four => 40.0,
+                        Width::Six => 30.0,
+                    };
+                    assert!(quality > minimum, "{id}: re-encoded at {quality:.1} dB SNR");
+                    checked[(width == Width::Six) as usize] += 1;
                 }
             }
         }
-        assert!(checked > 1000, "only {checked} streams were checked");
-        eprintln!("Checked {checked} streams.");
+        let [four, six] = checked;
+        assert!(
+            four > 1000 && six > 100,
+            "only {four} 4-bit and {six} 6-bit streams were checked"
+        );
+        eprintln!("Checked {four} 4-bit and {six} 6-bit streams.");
     }
 }

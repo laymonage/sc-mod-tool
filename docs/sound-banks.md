@@ -46,18 +46,29 @@ The header's fields are little-endian 32-bit:
 
 Each frame starts with the decoder's state (`0x34` bytes, signature `2`, with
 its unused fields zero), then up to two subframes. A subframe of `n` codes
-takes `n × bits / 8 + 1` bytes. Codes are packed into 32-bit little-endian
-words, most significant first, and the spare byte is zero.
+takes `n × bits / 8 + 1` bytes. Codes are one stream of bits, most
+significant first, stored as 32-bit little-endian words, so a 6-bit code can
+span two words. The spare byte is zero.
 
-When a 4-bit stream's last subframe ends partway through a word, its last
-bytes don't hold a whole word unless six or seven codes are left. If they
-do, the word is written as usual. Otherwise the codes are written in order,
-high nibble first. vgmstream reads a whole word there anyway, so it decodes
-up to five samples at the very end of such a stream from the bytes after it.
+When a stream's last subframe ends partway through a word, its last bytes
+may not hold the whole word. If they do, the word is written as usual, with
+the unused bits zero. Otherwise the bits are written in order, high bits
+first. vgmstream reads a whole word there anyway, so it decodes the last few
+samples of such a stream from the bytes after it.
 
 Almost every stream starts with the same state: a step of `0x500` and
 everything else zero. The decoder reloads the state at every frame, so the
 encoder writes its own state there as it goes.
+
+The 6-bit decoder only uses the state's step, `hist1` and latest delta. The
+other fields are zero, except `+0x08`: 35 of the 6-bit streams set it to a
+small number of their own, such as `2` or `-3`, in every frame. The decoder
+ignores it, and the encoder writes `0`.
+
+4-bit streams use codes 0 to 14, and 6-bit streams codes 1 to 61. The codes
+left out reach steps past the decoders' tables, except 6-bit codes 0 and 62.
+Those make the largest change but then shrink the step, so an encoder that
+used them would fall behind a rising or falling sound.
 
 The [extra maps](README.md#extra-maps)' banks differ in two ways:
 
