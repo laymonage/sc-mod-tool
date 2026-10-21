@@ -12,6 +12,7 @@ use super::banks::mission_label;
 use super::widgets::name_icon_button;
 use super::{Action, NO_TEXT, NO_TEXT_HINT, NOT_SHOWN_IN_GAME, is_shown_in_game};
 use crate::app::format::{format_bytes, format_duration, format_key};
+use crate::app::segments::table_columns;
 use crate::app::{SCModToolApp, SortColumn, TextFilter};
 
 impl SCModToolApp {
@@ -137,8 +138,10 @@ impl SCModToolApp {
             .sense(Sense::click())
             .auto_shrink([false, false])
             .cell_layout(Layout::left_to_right(Align::Center));
-        for column in &columns {
-            table = table.column(column.width);
+        // The play button's column, then the segment's.
+        table = table.column(Column::exact(28.0));
+        for (position, &column) in columns.iter().enumerate() {
+            table = table.column(column_width(column, position + 1 == columns.len()));
         }
         if scroll_to_selection
             && let Some(row) = self
@@ -152,21 +155,19 @@ impl SCModToolApp {
         let map_subtitles = is_map_bank && has_subtitles;
         table
             .header(22.0, |mut header| {
-                for column in &columns {
+                header.col(|_| {});
+                for &column in &columns {
                     header.col(|ui| {
-                        let Some(sort_column) = column.sort else {
-                            ui.strong(column.title);
-                            return;
-                        };
-                        let title = if sort.column == sort_column {
+                        let title = column_title(column);
+                        let title = if sort.column == column {
                             let arrow = if sort.descending {
                                 ICON_ARROW_DOWNWARD
                             } else {
                                 ICON_ARROW_UPWARD
                             };
-                            format!("{} {}", column.title, arrow.codepoint)
+                            format!("{title} {}", arrow.codepoint)
                         } else {
-                            column.title.to_owned()
+                            title.to_owned()
                         };
                         if ui
                             .add(egui::Button::new(RichText::new(title).strong()).frame(false))
@@ -174,7 +175,7 @@ impl SCModToolApp {
                             .on_hover_cursor(CursorIcon::PointingHand)
                             .clicked()
                         {
-                            actions.push(Action::SortBy(sort_column));
+                            actions.push(Action::SortBy(column));
                         }
                     });
                 }
@@ -259,78 +260,35 @@ impl SCModToolApp {
     }
 }
 
-/// A column of the segment table.
-pub(in crate::app) struct TableColumn {
-    title: &'static str,
-    pub(in crate::app) sort: Option<SortColumn>,
-    width: Column,
+/// A column's title in the segment table's header.
+fn column_title(column: SortColumn) -> &'static str {
+    match column {
+        SortColumn::Number => "#",
+        SortColumn::Duration => "Duration",
+        SortColumn::Size => "Size",
+        SortColumn::Offset => "Offset",
+        SortColumn::UsedIn => "Used in",
+        SortColumn::Entry => "Entry",
+        SortColumn::Key => "Key",
+        SortColumn::Name => "Name",
+        SortColumn::Subtitle => "Subtitle",
+    }
 }
 
-/// The segment table's columns for an `.LS0` bank or a sound map's bank.
-/// Map sounds' names come before their subtitles, when they have any.
-pub(in crate::app) fn table_columns(is_map_bank: bool, has_subtitles: bool) -> Vec<TableColumn> {
-    let column = |title, sort, width| TableColumn { title, sort, width };
-    let mut columns = vec![
-        column("", None, Column::exact(28.0)),
-        column("#", Some(SortColumn::Number), Column::auto().at_least(36.0)),
-        column(
-            "Duration",
-            Some(SortColumn::Duration),
-            Column::auto().at_least(64.0),
-        ),
-    ];
-    if is_map_bank {
-        columns.extend([
-            column(
-                "Used in",
-                Some(SortColumn::UsedIn),
-                Column::auto().at_least(64.0),
-            ),
-            column(
-                "Entry",
-                Some(SortColumn::Entry),
-                Column::auto().at_least(56.0),
-            ),
-            column("Key", Some(SortColumn::Key), Column::auto().at_least(80.0)),
-        ]);
-        if has_subtitles {
-            columns.push(column(
-                "Name",
-                Some(SortColumn::Name),
-                Column::auto().at_least(120.0).clip(true),
-            ));
-            columns.push(column(
-                "Subtitle",
-                Some(SortColumn::Subtitle),
-                Column::remainder().clip(true),
-            ));
-        } else {
-            columns.push(column(
-                "Name",
-                Some(SortColumn::Name),
-                Column::remainder().clip(true),
-            ));
-        }
-    } else {
-        columns.extend([
-            column(
-                "Size",
-                Some(SortColumn::Size),
-                Column::auto().at_least(64.0),
-            ),
-            column(
-                "Offset",
-                Some(SortColumn::Offset),
-                Column::auto().at_least(80.0),
-            ),
-            column(
-                "Subtitle",
-                Some(SortColumn::Subtitle),
-                Column::remainder().clip(true),
-            ),
-        ]);
+/// A column's width. The last column takes the space the others leave.
+fn column_width(column: SortColumn, is_last: bool) -> Column {
+    if is_last {
+        return Column::remainder().clip(true);
     }
-    columns
+    match column {
+        SortColumn::Number => Column::auto().at_least(36.0),
+        SortColumn::Duration | SortColumn::Size | SortColumn::UsedIn => {
+            Column::auto().at_least(64.0)
+        }
+        SortColumn::Entry => Column::auto().at_least(56.0),
+        SortColumn::Offset | SortColumn::Key => Column::auto().at_least(80.0),
+        SortColumn::Name | SortColumn::Subtitle => Column::auto().at_least(120.0).clip(true),
+    }
 }
 
 /// A segment's first subtitle, for the segment table.

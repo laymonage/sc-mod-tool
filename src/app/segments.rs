@@ -4,7 +4,6 @@
 use sc_mod_tool_core::{Bank, Segment, SegmentSource, subtitles::Subtitle};
 
 use super::format::format_key;
-use super::ui::segment_table::table_columns;
 use super::{SCModToolApp, SortColumn, TextFilter};
 
 impl SCModToolApp {
@@ -74,10 +73,7 @@ impl SCModToolApp {
             .collect::<Vec<_>>();
         // Banks without the sorted column keep their own order.
         let sort = self.segment_sort;
-        if !table_columns(bank.sound_kind.is_some(), filters_text)
-            .iter()
-            .any(|column| column.sort == Some(sort.column))
-        {
+        if !table_columns(bank.sound_kind.is_some(), filters_text).contains(&sort.column) {
             return visible;
         }
         let mut keyed = visible
@@ -162,6 +158,27 @@ impl SCModToolApp {
     }
 }
 
+/// The segment table's columns for an `.LS0` bank or a sound map's bank, after
+/// its play button. Every column can be sorted by. Map sounds' names come
+/// before their subtitles, when they have any.
+pub(super) fn table_columns(is_map_bank: bool, has_subtitles: bool) -> Vec<SortColumn> {
+    let mut columns = vec![SortColumn::Number, SortColumn::Duration];
+    if is_map_bank {
+        columns.extend([
+            SortColumn::UsedIn,
+            SortColumn::Entry,
+            SortColumn::Key,
+            SortColumn::Name,
+        ]);
+        if has_subtitles {
+            columns.push(SortColumn::Subtitle);
+        }
+    } else {
+        columns.extend([SortColumn::Size, SortColumn::Offset, SortColumn::Subtitle]);
+    }
+    columns
+}
+
 /// A value segments are sorted by.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum SortValue {
@@ -173,6 +190,31 @@ enum SortValue {
 mod tests {
     use super::*;
     use crate::app::test_support::{bank, segment};
+
+    #[test]
+    fn keeps_a_banks_order_when_it_lacks_the_sorted_column() {
+        let mut app = SCModToolApp::new(None);
+        let mut bank = bank("ENGLISH/1_1_0.LS0", None, None);
+        bank.segments = [3000, 1000, 2000]
+            .into_iter()
+            .enumerate()
+            .map(|(number, sample_count)| Segment {
+                id: format!("ENGLISH/1_1_0.LS0:{number}"),
+                segment: number,
+                ..segment(sample_count, 1000)
+            })
+            .collect();
+        app.banks = vec![bank];
+        app.selected_bank = Some(0);
+
+        app.segment_sort = app.segment_sort.by(SortColumn::Duration);
+        assert_eq!(app.visible_segments(), [1, 2, 0]);
+
+        // `.LS0` banks have no Key column, such as after sorting a map's bank
+        // by it and choosing another bank.
+        app.segment_sort = app.segment_sort.by(SortColumn::Key);
+        assert_eq!(app.visible_segments(), [0, 1, 2]);
+    }
 
     #[test]
     fn skips_through_segments_in_the_tables_order() {

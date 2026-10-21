@@ -1,7 +1,7 @@
 mod banks;
 mod bars;
 mod inspector;
-pub(super) mod segment_table;
+mod segment_table;
 mod widgets;
 
 use std::time::Duration;
