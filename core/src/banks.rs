@@ -15,6 +15,8 @@ use crate::sounds_folder::{
     safe_child_path,
 };
 use crate::{Bank, Error, GameCache, Language, SegmentSource};
+#[cfg(test)]
+pub(crate) use ls0::scan_bank as scan_ls0;
 use ls0::{collect_banks, read_bank};
 use missions::{leading_mission_code, mission_name, mission_names};
 

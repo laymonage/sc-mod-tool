@@ -1,5 +1,6 @@
 mod banks;
 pub mod decoder;
+pub mod encoder;
 mod error;
 mod sound_map_file;
 mod sounds_folder;

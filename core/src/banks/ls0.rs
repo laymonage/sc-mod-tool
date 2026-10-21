@@ -87,7 +87,11 @@ fn has_valid_frame(bytes: &[u8], offset: usize) -> bool {
         && read_u32_le(bytes, offset) == Some(2)
 }
 
-fn scan_bank(bytes: &[u8], bank_path: &str, cancelled: &AtomicBool) -> Result<Vec<Segment>, Error> {
+pub(crate) fn scan_bank(
+    bytes: &[u8],
+    bank_path: &str,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Segment>, Error> {
     let mut segments: Vec<Segment> = Vec::new();
     let mut offset = 0usize;
 

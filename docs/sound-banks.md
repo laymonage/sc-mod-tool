@@ -20,6 +20,45 @@ maps record the unpadded size. Scanned in
 A level's lines are usually stored together, in roughly the order they're
 spoken, which is a useful clue when checking a match by hand.
 
+### Stream layout
+
+What's below holds for every stream in the game's numeric banks, and the
+app's [encoder](../core/src/encoder.rs) writes streams the same way. A
+stream's layout depends only on its sample count, so a replacement with the
+same number of samples has the same size.
+
+The header's fields are little-endian 32-bit:
+
+| Offset | Field |
+|---|---|
+| `+0x00` | `8` |
+| `+0x04` | Sample count, which is also the number of codes |
+| `+0x08` | Number of subframes: the sample count divided by 1,536, rounded up |
+| `+0x0C` | Codes in the last subframe |
+| `+0x10` | Codes in the other subframes, always 1,536 |
+| `+0x14` | Subframes per frame, `2` |
+| `+0x18` | Sample rate, always 36,000 |
+| `+0x1C` | Usually `1`; otherwise values that look like leftover memory addresses, unrelated to the stream |
+| `+0x20` | `0` |
+| `+0x24` | Bits per code, `4` or `6` |
+| `+0x28` | `1` for 4-bit streams, `3` for 6-bit |
+| `+0x2C` | Channels, `1` |
+
+Each frame starts with the decoder's state (`0x34` bytes, signature `2`, with
+its unused fields zero), then up to two subframes. A subframe of `n` codes
+takes `n × bits / 8 + 1` bytes. Codes are packed into 32-bit little-endian
+words, most significant first, and the spare byte is zero.
+
+When a 4-bit stream's last subframe ends partway through a word, its last
+bytes don't hold a whole word unless six or seven codes are left. If they
+do, the word is written as usual. Otherwise the codes are written in order,
+high nibble first. vgmstream reads a whole word there anyway, so it decodes
+up to five samples at the very end of such a stream from the bytes after it.
+
+Almost every stream starts with the same state: a step of `0x500` and
+everything else zero. The decoder reloads the state at every frame, so the
+encoder writes its own state there as it goes.
+
 The [extra maps](README.md#extra-maps)' banks differ in two ways:
 
 - **6-bit codes.** Their streams use 6 bits per code instead of 4. The layout is
