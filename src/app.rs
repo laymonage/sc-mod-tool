@@ -118,6 +118,44 @@ impl TextFilter {
     }
 }
 
+/// What happens when a segment plays to the end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlaybackMode {
+    Once,
+    /// Play the next segment in the table.
+    Autoplay,
+    /// Play the segment again.
+    Repeat,
+}
+
+impl PlaybackMode {
+    /// The mode the playback mode button changes to.
+    fn next(self) -> Self {
+        match self {
+            PlaybackMode::Once => PlaybackMode::Autoplay,
+            PlaybackMode::Autoplay => PlaybackMode::Repeat,
+            PlaybackMode::Repeat => PlaybackMode::Once,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            PlaybackMode::Once => "Play once",
+            PlaybackMode::Autoplay => "Autoplay",
+            PlaybackMode::Repeat => "Repeat",
+        }
+    }
+
+    /// What clicking the playback mode button does.
+    fn action(self) -> &'static str {
+        match self {
+            PlaybackMode::Once => "Enable autoplay",
+            PlaybackMode::Autoplay => "Enable repeat",
+            PlaybackMode::Repeat => "Disable repeat",
+        }
+    }
+}
+
 /// A column the segment table can be sorted by.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortColumn {
@@ -201,6 +239,7 @@ pub struct SCModToolApp {
     /// own order.
     segment_sort: SegmentSort,
     show_warnings: bool,
+    playback_mode: PlaybackMode,
     /// Scroll the segment table to the selection on the next frame.
     scroll_to_selection: bool,
 }
@@ -245,6 +284,7 @@ impl SCModToolApp {
                 descending: false,
             },
             show_warnings: false,
+            playback_mode: PlaybackMode::Once,
             scroll_to_selection: false,
         }
     }
@@ -705,6 +745,27 @@ impl SCModToolApp {
         }
     }
 
+    /// Selects the segment and plays it, scrolling the table to it.
+    fn skip_to(&mut self, ctx: &egui::Context, segment_index: usize) {
+        self.selected_segment = Some(segment_index);
+        self.scroll_to_selection = true;
+        self.play_or_pause(ctx, segment_index);
+    }
+
+    /// Rewinds a segment that has played to the end, or plays it or the next
+    /// one again, depending on the playback mode.
+    fn finish_playback(&mut self, ctx: &egui::Context) {
+        let next = self
+            .active_playback
+            .as_ref()
+            .and_then(|playback| self.adjacent_segment(&playback.segment_id, 1));
+        match (self.playback_mode, next) {
+            (PlaybackMode::Repeat, _) => self.seek(Duration::ZERO),
+            (PlaybackMode::Autoplay, Some(index)) => self.skip_to(ctx, index),
+            _ => self.stop_playback(),
+        }
+    }
+
     fn toggle_pause(&mut self) {
         if let Some(playback) = &mut self.active_playback {
             playback.toggle_pause();
@@ -931,13 +992,12 @@ impl eframe::App for SCModToolApp {
             self.open_root(ctx, root);
         }
         self.handle_messages(ctx);
-        // Rewind a segment that has played to the end.
         if self
             .active_playback
             .as_ref()
             .is_some_and(|playback| !playback.stopped && playback.player.empty())
         {
-            self.stop_playback();
+            self.finish_playback(ctx);
         }
         // A paused segment can't finish, so it doesn't need repainting.
         let is_playing = self

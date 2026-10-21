@@ -7,9 +7,9 @@ use eframe::egui::{
 };
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
-    ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_DOWNLOAD, ICON_FOLDER_OPEN, ICON_PAUSE,
-    ICON_PLAY_ARROW, ICON_REFRESH, ICON_SEARCH, ICON_SKIP_NEXT, ICON_SKIP_PREVIOUS, ICON_STOP,
-    ICON_WARNING,
+    ICON_ARROW_DOWNWARD, ICON_ARROW_UPWARD, ICON_AUTOPLAY, ICON_DOWNLOAD, ICON_FOLDER_OPEN,
+    ICON_PAUSE, ICON_PLAY_ARROW, ICON_REFRESH, ICON_REPEAT_ONE, ICON_SEARCH, ICON_SKIP_NEXT,
+    ICON_SKIP_PREVIOUS, ICON_STOP, ICON_WARNING,
 };
 use sc_mod_tool_core::{
     Area, Bank, Segment, SegmentSource,
@@ -22,7 +22,7 @@ const NO_TEXT: &str = "No text";
 const NO_TEXT_HINT: &str =
     "This line exists in its scene, but the game's localization files have no text for it.";
 
-use super::{SCModToolApp, ScanProgress, SortColumn, TextFilter};
+use super::{PlaybackMode, SCModToolApp, ScanProgress, SortColumn, TextFilter};
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
 enum Action {
@@ -36,6 +36,7 @@ enum Action {
     PlayOrPause(usize),
     /// Select a segment from the playback controls and play it.
     SkipTo(usize),
+    CyclePlaybackMode,
     Export(usize),
     ExportBank,
     CancelBankExport,
@@ -92,11 +93,8 @@ impl SCModToolApp {
                 self.selected_segment = Some(index);
                 self.play_or_pause(ctx, index);
             }
-            Action::SkipTo(index) => {
-                self.selected_segment = Some(index);
-                self.scroll_to_selection = true;
-                self.play_or_pause(ctx, index);
-            }
+            Action::SkipTo(index) => self.skip_to(ctx, index),
+            Action::CyclePlaybackMode => self.playback_mode = self.playback_mode.next(),
             Action::Export(index) => {
                 self.selected_segment = Some(index);
                 self.export_segment(ctx, index);
@@ -361,6 +359,35 @@ impl SCModToolApp {
         }
 
         // Laid out right to left.
+        let mode = self.playback_mode;
+        // Playing once is autoplay turned off.
+        let icon = match mode {
+            PlaybackMode::Once | PlaybackMode::Autoplay => ICON_AUTOPLAY.codepoint,
+            PlaybackMode::Repeat => ICON_REPEAT_ONE.codepoint,
+        };
+        let button = ui.add(egui::Button::new(icon).selected(mode != PlaybackMode::Once));
+        if mode != PlaybackMode::Once {
+            // A dot in the corner too, so the mode being on doesn't rely on
+            // colour. It's painted over the button, so the icon doesn't move.
+            ui.painter().circle_filled(
+                button.rect.right_top() + egui::vec2(-5.0, 5.0),
+                1.5,
+                ui.visuals().selection.stroke.color,
+            );
+        }
+        // Named for its mode, as a toggle's name shouldn't change when it's
+        // pressed, and its tooltip says what clicking does.
+        button.widget_info(|| {
+            WidgetInfo::selected(
+                Role::Button,
+                true,
+                mode != PlaybackMode::Once,
+                format!("Playback mode: {}", mode.label()),
+            )
+        });
+        if button.on_hover_text(mode.action()).clicked() {
+            actions.push(Action::CyclePlaybackMode);
+        }
         let skip_button =
             |ui: &mut egui::Ui, actions: &mut Vec<Action>, offset, icon: &str, name| {
                 let target = playback.and_then(|_| self.adjacent_segment(segment_id, offset));
@@ -903,7 +930,7 @@ impl SCModToolApp {
     /// The segment `offset` places from `segment_id` in the segment table, as
     /// it's filtered and sorted. `None` past either end, or when the segment
     /// isn't in the selected bank, such as after choosing another bank.
-    fn adjacent_segment(&self, segment_id: &str, offset: isize) -> Option<usize> {
+    pub(super) fn adjacent_segment(&self, segment_id: &str, offset: isize) -> Option<usize> {
         let bank = self.selected_bank()?;
         let visible = self.visible_segments();
         let position = visible
