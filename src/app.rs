@@ -1,5 +1,10 @@
+mod format;
+mod names;
 #[cfg(test)]
 mod screenshots;
+mod segments;
+#[cfg(test)]
+mod test_support;
 mod ui;
 
 use std::collections::HashMap;
@@ -583,10 +588,10 @@ impl SCModToolApp {
             return;
         };
         let bank_path = bank.path.clone();
-        let label = ui::segment_label(bank, &segment);
+        let label = names::segment_label(bank, &segment);
         let mut dialog = rfd::FileDialog::new()
             .set_title("Export segment")
-            .set_file_name(ui::export_file_name(bank, &segment))
+            .set_file_name(names::export_file_name(bank, &segment))
             .add_filter("WAV audio", &["wav"]);
         if let Some(directory) = &self.export_directory {
             dialog = dialog.set_directory(directory);
@@ -630,7 +635,7 @@ impl SCModToolApp {
         let Some(bank) = self.selected_bank() else {
             return;
         };
-        let label = ui::bank_title(bank);
+        let label = names::bank_title(bank);
         let mut dialog = rfd::FileDialog::new().set_title(format!("Export {label} to a folder"));
         if let Some(directory) = &self.export_directory {
             dialog = dialog.set_directory(directory);
@@ -638,13 +643,13 @@ impl SCModToolApp {
         let Some(parent) = dialog.pick_folder() else {
             return;
         };
-        let folder = parent.join(ui::export_folder_name(bank));
+        let folder = parent.join(names::export_folder_name(bank));
         let bank_path = bank.path.clone();
         let files: Vec<_> = bank
             .segments
             .iter()
             .cloned()
-            .zip(ui::export_file_names(bank))
+            .zip(names::export_file_names(bank))
             .collect();
         let total = files.len();
         let cancelled = Arc::new(AtomicBool::new(false));
