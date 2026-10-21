@@ -1389,8 +1389,10 @@ fn format_duration(segment: &Segment) -> String {
 
 /// A segment action's button, with an icon before its label.
 fn action_button(ui: &mut egui::Ui, icon: &str, label: &str) -> Response {
-    let button =
-        ui.add(egui::Button::new(format!("{icon}  {label}")).min_size(egui::vec2(96.0, 28.0)));
+    let button = ui.add(
+        egui::Button::new((format!("{icon}  {label}"), egui::Atom::grow()))
+            .min_size(egui::vec2(96.0, 28.0)),
+    );
     // Named without its icon, which screen readers can't read.
     button.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
     button
