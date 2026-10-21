@@ -46,6 +46,9 @@ pub enum SaveTarget {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SaveReport {
     pub written: Vec<PathBuf>,
+    /// The paths of the banks written, as the edits gave them, in the same
+    /// order as `written`.
+    pub saved: Vec<String>,
     /// The copies of the game's files made before they were first replaced.
     pub backups: Vec<PathBuf>,
     pub failures: Vec<String>,
@@ -142,7 +145,10 @@ pub fn save(
             }
         };
         match write_atomically(&destination, &bytes) {
-            Ok(()) => report.written.push(destination),
+            Ok(()) => {
+                report.written.push(destination);
+                report.saved.push(edit.path.clone());
+            }
             Err(error) => report.failures.push(format!(
                 "Could not write {}: {error}",
                 destination.display()
@@ -526,6 +532,7 @@ mod tests {
         );
         assert_eq!(report.written.len(), 1);
         assert!(report.written[0].ends_with("Sounds/GERMAN/1_1_0.LS0"));
+        assert_eq!(report.saved, ["GERMAN/1_1_0.LS0"]);
     }
 
     #[test]

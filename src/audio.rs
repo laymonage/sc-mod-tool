@@ -9,7 +9,8 @@ use rodio::{
 };
 use sc_mod_tool_core::decoder::DecodedAudio;
 
-/// A decoded segment, ready to play.
+/// A decoded segment, ready to play. Copies share their samples.
+#[derive(Clone)]
 pub struct PlayableAudio(SamplesBuffer);
 
 impl PlayableAudio {
@@ -35,6 +36,8 @@ impl PlayableAudio {
 pub struct ActivePlayback {
     pub player: Player,
     pub segment_id: String,
+    /// Whether it's the game's own audio for a replaced segment.
+    pub original: bool,
     pub duration: Duration,
     /// Whether playback has stopped, at the end or by the user, leaving the
     /// segment loaded at its start.
@@ -91,6 +94,7 @@ impl AudioOutput {
         Ok(ActivePlayback {
             player,
             segment_id,
+            original: false,
             duration: audio.total_duration().unwrap_or_default(),
             stopped: false,
             start: Duration::ZERO,

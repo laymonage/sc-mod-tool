@@ -16,7 +16,9 @@ const NO_TEXT: &str = "No text";
 const NO_TEXT_HINT: &str =
     "This line exists in its scene, but the game's localization files have no text for it.";
 
+use super::edits::UnsavedChoice;
 use super::{SCModToolApp, SortColumn};
+use sc_mod_tool_core::convert::FitOptions;
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
 enum Action {
@@ -40,6 +42,23 @@ enum Action {
     Seek(Duration),
     ToggleWarnings,
     SortBy(SortColumn),
+    /// Choose an audio file to replace a segment with.
+    Replace(usize),
+    /// Play the game's own audio for a replaced segment.
+    PlayOriginal(usize),
+    /// Remove a replacement, by bank path and segment ID.
+    Revert(String, String),
+    /// Remove all of a bank's replacements, by its path.
+    RevertBank(String),
+    SetDraftFit(FitOptions),
+    PreviewDraft,
+    ApplyDraft,
+    CloseDraft,
+    ChooseFfmpeg,
+    Save,
+    SaveToFolder,
+    CancelSave,
+    ResolveUnsaved(UnsavedChoice),
 }
 
 impl SCModToolApp {
@@ -73,7 +92,7 @@ impl SCModToolApp {
 
     fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::ChooseRoot => self.choose_root(ctx),
+            Action::ChooseRoot => self.request_choose_root(ctx),
             Action::SelectLanguage(language) => self.select_language(ctx, language),
             Action::Rescan => self.rescan(ctx),
             Action::CancelScan => self.cancel_scan(),
@@ -103,6 +122,25 @@ impl SCModToolApp {
                 self.segment_sort = self.segment_sort.by(column);
                 self.scroll_to_selection = true;
             }
+            Action::Replace(index) => {
+                self.selected_segment = Some(index);
+                self.start_replacement(ctx, index);
+            }
+            Action::PlayOriginal(index) => {
+                self.selected_segment = Some(index);
+                self.play_original(ctx, index);
+            }
+            Action::Revert(bank_path, segment_id) => self.revert_segment(&bank_path, &segment_id),
+            Action::RevertBank(bank_path) => self.revert_bank(&bank_path),
+            Action::SetDraftFit(fit) => self.set_draft_fit(fit),
+            Action::PreviewDraft => self.preview_draft(ctx),
+            Action::ApplyDraft => self.apply_draft(ctx),
+            Action::CloseDraft => self.close_draft(),
+            Action::ChooseFfmpeg => self.choose_ffmpeg(),
+            Action::Save => self.save_in_place(ctx),
+            Action::SaveToFolder => self.save_to_folder(ctx),
+            Action::CancelSave => self.cancel_save(),
+            Action::ResolveUnsaved(choice) => self.resolve_unsaved(ctx, choice),
         }
     }
 

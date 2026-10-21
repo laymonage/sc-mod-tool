@@ -1,3 +1,4 @@
+mod edits;
 mod format;
 mod names;
 #[cfg(test)]
@@ -23,6 +24,7 @@ use sc_mod_tool_core::{
 };
 
 use crate::audio::{ActivePlayback, AudioOutput, PlayableAudio};
+use edits::{GuardedAction, PendingEdits, Replacement, ReplacementDraft, SaveJob};
 
 enum WorkerMessage {
     Languages {
@@ -41,7 +43,17 @@ enum WorkerMessage {
     Playback {
         request: u64,
         segment_id: String,
+        original: bool,
         result: Result<PlayableAudio, Error>,
+    },
+    /// A replacement draft's file was read, and its replacement prepared if
+    /// asked for.
+    Draft {
+        request: u64,
+        result: Result<(Arc<Vec<i16>>, Option<Replacement>), Error>,
+    },
+    Saved {
+        result: Result<sc_mod_tool_core::edit::SaveReport, Error>,
     },
     Export {
         label: String,
@@ -94,6 +106,8 @@ enum ScanProgress {
 /// A segment that is being read and decoded before it plays.
 struct PendingPlayback {
     segment_id: String,
+    /// Whether it's the game's own audio for a replaced segment.
+    original: bool,
     cancel: Arc<AtomicBool>,
 }
 
@@ -247,6 +261,24 @@ pub struct SCModToolApp {
     playback_mode: PlaybackMode,
     /// Scroll the segment table to the selection on the next frame.
     scroll_to_selection: bool,
+
+    /// Replacements that aren't saved yet, for any of the game's banks.
+    edits: PendingEdits,
+    /// The replacement being made, if any.
+    draft: Option<ReplacementDraft>,
+    draft_request: u64,
+    save_job: Option<SaveJob>,
+    /// What's waiting for an answer about unsaved replacements.
+    unsaved_prompt: Option<GuardedAction>,
+    /// Set once the window may close, after asking about unsaved replacements.
+    closing: bool,
+    /// Where FFmpeg is, if the user chose it.
+    ffmpeg_path: Option<PathBuf>,
+    /// Where the last replacement audio was chosen from.
+    source_directory: Option<PathBuf>,
+    /// The bank and segment to select once the scan in progress finishes, by
+    /// path and ID.
+    reselect: Option<(String, Option<String>)>,
 }
 
 impl SCModToolApp {
@@ -291,7 +323,22 @@ impl SCModToolApp {
             show_warnings: false,
             playback_mode: PlaybackMode::Once,
             scroll_to_selection: false,
+            edits: PendingEdits::default(),
+            draft: None,
+            draft_request: 0,
+            save_job: None,
+            unsaved_prompt: None,
+            closing: false,
+            ffmpeg_path: None,
+            source_directory: None,
+            reselect: None,
         }
+    }
+
+    /// Uses the FFmpeg the user chose before, if any.
+    pub fn with_ffmpeg_path(mut self, path: Option<PathBuf>) -> Self {
+        self.ffmpeg_path = path;
+        self
     }
 
     fn choose_root(&mut self, ctx: &egui::Context) {
@@ -307,6 +354,10 @@ impl SCModToolApp {
     fn open_root(&mut self, ctx: &egui::Context, root: PathBuf) {
         self.cancel_scan();
         self.clear_playback();
+        // Replacements belong to the game they were made for.
+        self.close_draft();
+        self.edits.clear();
+        self.reselect = None;
         self.scan_request = self.scan_request.wrapping_add(1);
         self.scan_cancel = None;
         self.scan_progress = None;
@@ -330,6 +381,9 @@ impl SCModToolApp {
     }
 
     fn select_language(&mut self, ctx: &egui::Context, language: String) {
+        if self.refuse_while_saving() {
+            return;
+        }
         let nothing_loaded = self.banks.is_empty() && self.scan_progress.is_none();
         if self.selected_language.as_deref() != Some(&language) || nothing_loaded {
             self.selected_language = Some(language);
@@ -338,10 +392,22 @@ impl SCModToolApp {
     }
 
     fn rescan(&mut self, ctx: &egui::Context) {
+        if self.refuse_while_saving() {
+            return;
+        }
         // Rescanning re-reads the game files, including its scripts and
         // shared sound maps.
         self.game_cache = Arc::default();
         self.start_scan(ctx);
+    }
+
+    /// Whether a save is in progress, which scanning would get in the way of,
+    /// telling the user if so.
+    fn refuse_while_saving(&mut self) -> bool {
+        if self.is_saving() {
+            self.set_status("Wait for the save to finish.", true);
+        }
+        self.is_saving()
     }
 
     fn start_scan(&mut self, ctx: &egui::Context) {
@@ -502,6 +568,16 @@ impl SCModToolApp {
             .map(|pending| pending.segment_id.as_str())
     }
 
+    /// Whether what's playing or loaded is the game's own audio for a replaced
+    /// segment, rather than what the segment plays now.
+    fn is_original_loaded(&self) -> bool {
+        match (&self.pending_playback, &self.active_playback) {
+            (Some(pending), _) => pending.original,
+            (None, Some(playback)) => playback.original,
+            (None, None) => false,
+        }
+    }
+
     /// Plays the segment, or stops it if it is already playing.
     fn toggle_playback(&mut self, ctx: &egui::Context, segment_index: usize) {
         let Some(segment) = self
@@ -510,10 +586,11 @@ impl SCModToolApp {
         else {
             return;
         };
-        if self.playing_segment_id() == Some(segment.id.as_str()) {
+        let current = !self.is_original_loaded();
+        if current && self.playing_segment_id() == Some(segment.id.as_str()) {
             self.stop_playback();
             self.set_status("Playback stopped.", false);
-        } else if self.loaded_segment_id() == Some(segment.id.as_str()) {
+        } else if current && self.loaded_segment_id() == Some(segment.id.as_str()) {
             // The last segment played is still loaded, so play it again.
             self.toggle_pause();
         } else {
@@ -532,15 +609,55 @@ impl SCModToolApp {
         let is_loaded = self
             .active_playback
             .as_ref()
-            .is_some_and(|playback| playback.segment_id == segment.id);
+            .is_some_and(|playback| playback.segment_id == segment.id && !playback.original);
+        let is_pending = self
+            .pending_playback
+            .as_ref()
+            .is_some_and(|pending| pending.segment_id == segment.id && !pending.original);
         if is_loaded {
             self.toggle_pause();
-        } else if self.pending_segment_id() != Some(segment.id.as_str()) {
+        } else if !is_pending {
             self.play_segment(ctx, segment_index);
         }
     }
 
+    /// Plays what the segment plays now: its replacement if it has one.
     fn play_segment(&mut self, ctx: &egui::Context, segment_index: usize) {
+        let replacement = self.selected_bank().and_then(|bank| {
+            let segment = bank.segments.get(segment_index)?;
+            let replacement = self.replacement(&bank.path, &segment.id)?;
+            Some((replacement.preview.clone(), segment.id.clone()))
+        });
+        match replacement {
+            Some((preview, segment_id)) => self.play_preview(preview, segment_id),
+            None => self.decode_and_play(ctx, segment_index, false),
+        }
+    }
+
+    /// Plays the game's own audio for the segment, even if it's replaced.
+    fn play_original(&mut self, ctx: &egui::Context, segment_index: usize) {
+        let Some(bank) = self.selected_bank() else {
+            return;
+        };
+        let Some(segment) = bank.segments.get(segment_index) else {
+            return;
+        };
+        let original = self.replacement(&bank.path, &segment.id).is_some();
+        self.decode_and_play(ctx, segment_index, original);
+    }
+
+    /// Plays audio that's already decoded, such as a replacement's.
+    fn play_preview(&mut self, preview: PlayableAudio, segment_id: String) {
+        self.clear_playback();
+        match self.audio.play(preview, segment_id) {
+            Ok(playback) => self.active_playback = Some(playback),
+            Err(error) => self.set_status(format!("Could not start playback: {error}"), true),
+        }
+    }
+
+    /// Reads and decodes the segment from its bank, then plays it. `original`
+    /// marks it as the game's own audio for a replaced segment.
+    fn decode_and_play(&mut self, ctx: &egui::Context, segment_index: usize, original: bool) {
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -558,6 +675,7 @@ impl SCModToolApp {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.pending_playback = Some(PendingPlayback {
             segment_id: segment_id.clone(),
+            original,
             cancel: Arc::clone(&cancelled),
         });
         let sender = self.sender.clone();
@@ -569,6 +687,7 @@ impl SCModToolApp {
             let _ = sender.send(WorkerMessage::Playback {
                 request,
                 segment_id,
+                original,
                 result,
             });
             repaint.request_repaint();
@@ -824,6 +943,7 @@ impl SCModToolApp {
                 WorkerMessage::Playback {
                     request,
                     segment_id,
+                    original,
                     result,
                 } => {
                     if request != self.playback_request {
@@ -832,7 +952,10 @@ impl SCModToolApp {
                     self.pending_playback = None;
                     match result {
                         Ok(audio) => match self.audio.play(audio, segment_id) {
-                            Ok(playback) => self.active_playback = Some(playback),
+                            Ok(mut playback) => {
+                                playback.original = original;
+                                self.active_playback = Some(playback);
+                            }
                             Err(error) => {
                                 self.set_status(format!("Could not start playback: {error}"), true)
                             }
@@ -866,6 +989,10 @@ impl SCModToolApp {
                         self.finish_bank_export(&export, result);
                     }
                 }
+                WorkerMessage::Draft { request, result } => {
+                    self.finish_draft_job(request, result);
+                }
+                WorkerMessage::Saved { result } => self.finish_save(ctx, result),
             }
         }
     }
@@ -882,6 +1009,9 @@ impl SCModToolApp {
         self.selected_bank = banks.iter().position(|bank| !bank.segments.is_empty());
         self.banks = banks;
         self.select_first_segment();
+        if let Some((bank_path, segment_id)) = self.reselect.take() {
+            self.reselect_bank(&bank_path, segment_id.as_deref());
+        }
 
         let count = |is_map: bool| -> usize {
             self.banks
@@ -911,6 +1041,24 @@ impl SCModToolApp {
                 ),
                 false,
             ),
+        }
+    }
+
+    /// Selects the bank at `bank_path`, and the segment `segment_id` in it if
+    /// it's there, such as after saving rereads them.
+    fn reselect_bank(&mut self, bank_path: &str, segment_id: Option<&str>) {
+        let Some(index) = self.banks.iter().position(|bank| bank.path == bank_path) else {
+            return;
+        };
+        self.selected_bank = Some(index);
+        self.select_first_segment();
+        if let Some(segment) = segment_id.and_then(|id| {
+            self.banks[index]
+                .segments
+                .iter()
+                .position(|segment| segment.id == id)
+        }) {
+            self.selected_segment = Some(segment);
         }
     }
 
@@ -983,12 +1131,18 @@ pub fn setup_context(ctx: &egui::Context) {
 
 /// The storage key for the last game folder opened.
 pub const ROOT_KEY: &str = "root";
+/// The storage key for the FFmpeg the user chose.
+pub const FFMPEG_KEY: &str = "ffmpeg";
 
 impl eframe::App for SCModToolApp {
-    /// Remembers the game folder, to open it again next time.
+    /// Remembers the game folder, to open it again next time, and FFmpeg if
+    /// the user chose it.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Some(root) = self.root.as_ref().and_then(|root| root.to_str()) {
             storage.set_string(ROOT_KEY, root.to_owned());
+        }
+        if let Some(ffmpeg) = self.ffmpeg_path.as_ref().and_then(|path| path.to_str()) {
+            storage.set_string(FFMPEG_KEY, ffmpeg.to_owned());
         }
     }
 
@@ -997,6 +1151,7 @@ impl eframe::App for SCModToolApp {
             self.open_root(ctx, root);
         }
         self.handle_messages(ctx);
+        self.guard_close(ctx);
         if self
             .active_playback
             .as_ref()
@@ -1015,6 +1170,8 @@ impl eframe::App for SCModToolApp {
         if self.scan_progress.is_some()
             || self.discovering_languages
             || self.pending_playback.is_some()
+            || self.draft.as_ref().is_some_and(ReplacementDraft::is_busy)
+            || self.is_saving()
             || is_playing
         {
             ctx.request_repaint_after(Duration::from_millis(50));

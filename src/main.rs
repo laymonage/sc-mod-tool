@@ -31,7 +31,13 @@ fn main() -> eframe::Result<()> {
                 let root = PathBuf::from(cc.storage?.get_string(app::ROOT_KEY)?);
                 root.is_dir().then_some(root)
             });
-            Ok(Box::new(app::SCModToolApp::new(startup_root)))
+            let ffmpeg = cc
+                .storage
+                .and_then(|storage| storage.get_string(app::FFMPEG_KEY))
+                .map(PathBuf::from);
+            Ok(Box::new(
+                app::SCModToolApp::new(startup_root).with_ffmpeg_path(ffmpeg),
+            ))
         }),
     )
 }
