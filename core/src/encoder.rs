@@ -73,6 +73,20 @@ impl StreamHeader {
         length
     }
 
+    /// This header, describing a stream of `sample_count` samples.
+    fn for_samples(&self, sample_count: u32) -> StreamHeader {
+        let subframe_count = sample_count.div_ceil(CODES_PER_SUBFRAME);
+        let mut header = self.clone();
+        header.set_field(0x04, sample_count);
+        header.set_field(0x08, subframe_count);
+        header.set_field(
+            0x0C,
+            sample_count - (subframe_count - 1) * CODES_PER_SUBFRAME,
+        );
+        header.set_field(0x10, CODES_PER_SUBFRAME);
+        header
+    }
+
     fn width(&self) -> Width {
         if self.field(0x24) == 6 {
             Width::Six
@@ -145,16 +159,7 @@ fn encode(
         .filter(|count| *count > 0)
         .ok_or("A stream needs at least one sample, and fewer than 2³² of them.")?;
     let width = template.width();
-    let subframe_count = sample_count.div_ceil(CODES_PER_SUBFRAME);
-    let mut header = template.clone();
-    header.set_field(0x04, sample_count);
-    header.set_field(0x08, subframe_count);
-    header.set_field(
-        0x0C,
-        sample_count - (subframe_count - 1) * CODES_PER_SUBFRAME,
-    );
-    header.set_field(0x10, CODES_PER_SUBFRAME);
-
+    let header = template.for_samples(sample_count);
     let mut stream = Vec::with_capacity(header.stream_length(sample_count));
     stream.extend_from_slice(&header.0);
     let mut decoded = Vec::with_capacity(samples.len());
@@ -541,6 +546,7 @@ fn abs_max(value: i16, limit: i32) -> i16 {
 mod tests {
     use super::*;
     use crate::decoder;
+    use std::sync::atomic::AtomicUsize;
 
     const WIDTHS: [Width; 2] = [Width::Four, Width::Six];
 
@@ -809,8 +815,10 @@ mod tests {
 
     /// Checks the encoder against every mono stream in the game: decoding a
     /// stream's codes from its own states matches vgmstream, packing them and
-    /// its states again gives the same bytes, and encoding its audio again
-    /// gives a stream of the same layout that sounds nearly the same.
+    /// its states again gives the same bytes, and the encoder would give it the
+    /// same header and length. Encoding is slow, so only every tenth 4-bit
+    /// stream and every 6-bit one is encoded again, to check that it sounds
+    /// nearly the same.
     #[test]
     #[ignore = "requires local Splinter Cell game files; set SC1_GAME_DIR"]
     fn matches_every_game_stream() {
@@ -821,7 +829,7 @@ mod tests {
             });
         let cancelled = AtomicBool::new(false);
         let mut cache = crate::GameCache::default();
-        let mut checked = [0; 2];
+        let mut streams = Vec::new();
         for language in crate::discover_languages(&game_root).unwrap() {
             let banks = crate::discover_banks_with_progress(
                 &game_root,
@@ -831,77 +839,113 @@ mod tests {
                 |_, _, _| {},
             )
             .unwrap();
-            for bank in banks.iter().filter(|bank| bank.sound_kind.is_none()) {
-                for segment in &bank.segments {
-                    let Some((offset, length)) = segment.stream_range() else {
-                        continue;
-                    };
-                    let original =
-                        crate::read_segment(&game_root, &bank.path, offset, length).unwrap();
-                    let template = StreamHeader::parse(&original).unwrap();
-                    let width = template.width();
-                    let id = &segment.id;
-                    let sample_count = template.sample_count();
-                    let reference = decoder::decode(&original, sample_count, &cancelled)
-                        .unwrap()
-                        .samples;
-
-                    let mut repacked = original[..STREAM_HEADER_SIZE].to_vec();
-                    let mut decoded = Vec::new();
-                    let mut position = STREAM_HEADER_SIZE;
-                    let mut state = State::INITIAL;
-                    for (index, count) in subframe_code_counts(sample_count).enumerate() {
-                        if index % 2 == 0 {
-                            let bytes = &original[position..position + STATE_SIZE];
-                            state = State::read(bytes);
-                            state.write(&mut repacked);
-                            position += STATE_SIZE;
-                        }
-                        let size = subframe_length(count, width);
-                        let codes = unpack_codes(
-                            &original[position..position + size],
-                            count as usize,
-                            width,
-                        );
-                        decoded.extend(codes.iter().map(|&code| state.expand(code, width)));
-                        pack_codes(&codes, width, &mut repacked);
-                        position += size;
+            for bank in banks.into_iter().filter(|bank| bank.sound_kind.is_none()) {
+                for segment in bank.segments {
+                    if let Some((offset, length)) = segment.stream_range() {
+                        streams.push((bank.path.clone(), segment.id, offset, length));
                     }
-                    assert_eq!(repacked, original, "{id}: repacked codes differ");
-                    let compared = reference.len() - unreliable_tail(sample_count, width);
-                    assert_eq!(
-                        decoded[..compared],
-                        reference[..compared],
-                        "{id}: decoded samples differ from vgmstream"
-                    );
-
-                    let encoded = encode_stream(&template, &reference, &cancelled).unwrap();
-                    assert_eq!(encoded.len(), original.len(), "{id}: length differs");
-                    assert_eq!(
-                        encoded[..STREAM_HEADER_SIZE],
-                        original[..STREAM_HEADER_SIZE],
-                        "{id}: header differs"
-                    );
-                    let reencoded = decoder::decode(&encoded, sample_count, &cancelled)
-                        .unwrap()
-                        .samples;
-                    let quality = snr(&reference, &reencoded);
-                    // The worst in the game are about 44 dB for 4-bit and 32 dB for
-                    // 6-bit.
-                    let minimum = match width {
-                        Width::Four => 40.0,
-                        Width::Six => 30.0,
-                    };
-                    assert!(quality > minimum, "{id}: re-encoded at {quality:.1} dB SNR");
-                    checked[(width == Width::Six) as usize] += 1;
                 }
             }
         }
-        let [four, six] = checked;
+
+        let next = AtomicUsize::new(0);
+        let checked = [AtomicUsize::new(0), AtomicUsize::new(0)];
+        let threads = std::thread::available_parallelism().map_or(4, usize::from);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((path, id, offset, length)) = streams.get(index) else {
+                            break;
+                        };
+                        let original =
+                            crate::read_segment(&game_root, path, *offset, *length).unwrap();
+                        let width = check_game_stream(id, &original, index.is_multiple_of(10));
+                        checked[(width == Width::Six) as usize].fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        let [four, six] = checked.map(AtomicUsize::into_inner);
         assert!(
             four > 1000 && six > 100,
             "only {four} 4-bit and {six} 6-bit streams were checked"
         );
         eprintln!("Checked {four} 4-bit and {six} 6-bit streams.");
+    }
+
+    /// Checks one of the game's streams, `original`, as
+    /// [`matches_every_game_stream`] says. It's encoded again if it has 6-bit
+    /// codes or `reencode` is set.
+    fn check_game_stream(id: &str, original: &[u8], reencode: bool) -> Width {
+        let cancelled = AtomicBool::new(false);
+        let template = StreamHeader::parse(original).unwrap();
+        let width = template.width();
+        let sample_count = template.sample_count();
+        assert_eq!(
+            template.for_samples(sample_count),
+            template,
+            "{id}: header differs"
+        );
+        assert_eq!(
+            template.stream_length(sample_count),
+            original.len(),
+            "{id}: length differs"
+        );
+        let reference = decoder::decode(original, sample_count, &cancelled)
+            .unwrap()
+            .samples;
+
+        let mut repacked = original[..STREAM_HEADER_SIZE].to_vec();
+        let mut decoded = Vec::new();
+        let mut position = STREAM_HEADER_SIZE;
+        let mut state = State::INITIAL;
+        for (index, count) in subframe_code_counts(sample_count).enumerate() {
+            if index % 2 == 0 {
+                let bytes = &original[position..position + STATE_SIZE];
+                state = State::read(bytes);
+                state.write(&mut repacked);
+                position += STATE_SIZE;
+            }
+            let size = subframe_length(count, width);
+            let codes = unpack_codes(&original[position..position + size], count as usize, width);
+            decoded.extend(codes.iter().map(|&code| state.expand(code, width)));
+            pack_codes(&codes, width, &mut repacked);
+            position += size;
+        }
+        assert_eq!(repacked, original, "{id}: repacked codes differ");
+        let compared = reference.len() - unreliable_tail(sample_count, width);
+        assert_eq!(
+            decoded[..compared],
+            reference[..compared],
+            "{id}: decoded samples differ from vgmstream"
+        );
+
+        if reencode || width == Width::Six {
+            let encoded = encode_stream(&template, &reference, &cancelled).unwrap();
+            assert_eq!(
+                encoded.len(),
+                original.len(),
+                "{id}: encoded length differs"
+            );
+            assert_eq!(
+                encoded[..STREAM_HEADER_SIZE],
+                original[..STREAM_HEADER_SIZE],
+                "{id}: encoded header differs"
+            );
+            let reencoded = decoder::decode(&encoded, sample_count, &cancelled)
+                .unwrap()
+                .samples;
+            let quality = snr(&reference, &reencoded);
+            // The worst in the game are about 44 dB for 4-bit and 32 dB for
+            // 6-bit.
+            let minimum = match width {
+                Width::Four => 40.0,
+                Width::Six => 30.0,
+            };
+            assert!(quality > minimum, "{id}: re-encoded at {quality:.1} dB SNR");
+        }
+        width
     }
 }

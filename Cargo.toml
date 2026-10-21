@@ -21,3 +21,8 @@ sc-mod-tool-core = { path = "core", default-features = false }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37.0", features = ["eframe", "wgpu", "snapshot"] }
+
+# The encoder is too slow unoptimized: in a debug build, encoding a line could
+# take longer than playing it.
+[profile.dev.package.sc-mod-tool-core]
+opt-level = 3
