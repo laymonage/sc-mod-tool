@@ -4,3 +4,4 @@ target/
 /core/uelib-bridge-tests/bin/
 /core/uelib-bridge-tests/obj/
 /dist/
+/build/

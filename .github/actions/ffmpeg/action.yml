@@ -1,0 +1,42 @@
+name: FFmpeg
+description: >
+  Builds the FFmpeg that release packages ship with scripts/ffmpeg.sh, or
+  restores it from the cache, and puts it on the PATH.
+
+inputs:
+  target:
+    description: The Rust target triple to build FFmpeg for.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # A Linux build only runs on a glibc as new as the one it was built
+    # against, so the runner image is part of the key.
+    - id: image
+      shell: bash
+      run: echo "name=${ImageOS:-$RUNNER_OS}" >> "$GITHUB_OUTPUT"
+
+    - id: cache
+      uses: actions/cache@v6
+      with:
+        path: build/ffmpeg/${{ inputs.target }}
+        key: ffmpeg-${{ inputs.target }}-${{ steps.image.outputs.name }}-${{ hashFiles('scripts/ffmpeg.sh') }}
+
+    - if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: false
+        install: curl tar xz make diffutils mingw-w64-ucrt-x86_64-gcc
+
+    - if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      shell: msys2 {0}
+      run: bash scripts/ffmpeg.sh build ${{ inputs.target }}
+
+    - if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      shell: bash
+      run: bash scripts/ffmpeg.sh build ${{ inputs.target }}
+
+    - shell: bash
+      run: echo "$GITHUB_WORKSPACE/build/ffmpeg/${{ inputs.target }}" >> "$GITHUB_PATH"

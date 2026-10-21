@@ -39,9 +39,12 @@ dotnet test core/uelib-bridge-tests    # the bridge's script matcher
 cargo run -- "/path/to/Splinter Cell"  # the folder argument is optional
 ```
 
-Replacing audio needs [FFmpeg](https://ffmpeg.org/download.html). The app looks
-for `ffmpeg` beside itself, then on the `PATH`, and on macOS in Homebrew's
-folders; if it isn't found, you can choose where it is.
+Replacing audio needs [FFmpeg](https://ffmpeg.org/download.html). Release
+packages include one. The app looks for `ffmpeg` beside itself, then on the
+`PATH`, and on macOS in Homebrew's folders; if it isn't found, you can choose
+where it is. `scripts/ffmpeg.sh build <target>` builds the one releases ship,
+into `build/ffmpeg/<target>`; on Windows it needs MSYS2's UCRT64 shell with
+`gcc` and `make`.
 
 The .NET SDK builds the UELib bridge used for subtitles. It can't be
 cross-compiled to another OS. To build without it, pass
@@ -52,7 +55,7 @@ The bridge library (`SCModUELibBridge.dll`, `libSCModUELibBridge.dylib` or
 it.
 
 When redistributing, include the license notices of the third-party code built
-into the app and the bridge:
+into the app and the bridge, and of FFmpeg if you ship it:
 
 - **vgmstream**, which decodes the audio, is built into the app:
   [`vendor/vgmstream/COPYING`](vendor/vgmstream/COPYING).
@@ -61,6 +64,10 @@ into the app and the bridge:
 - **The .NET runtime** is compiled into the bridge by Native AOT: MIT, with its
   [license](https://github.com/dotnet/runtime/blob/main/LICENSE.TXT) and
   [third-party notices](https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT).
+- **FFmpeg**, which the app runs to read and stretch audio, ships beside it:
+  LGPL 2.1 or later. It's built without changes and without external
+  libraries, and its source goes with each release, as the LGPL asks.
+  `scripts/package.sh` adds its license and how it was built.
 
 ## Game-data tests
 

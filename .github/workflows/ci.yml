@@ -23,7 +23,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -32,18 +38,13 @@ jobs:
 
       - name: Install Linux packages
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential clang zlib1g-dev pkg-config libasound2-dev ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang zlib1g-dev pkg-config libasound2-dev
 
-      # The conversion tests run FFmpeg. Linux gets it with the packages above.
-      - name: Install FFmpeg
-        if: runner.os != 'Linux'
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = macOS ]; then
-            brew install ffmpeg
-          else
-            choco install ffmpeg --no-progress -y
-          fi
+      # The conversion tests run the FFmpeg that release packages ship.
+      - name: FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          target: ${{ matrix.target }}
 
       - uses: actions/setup-dotnet@v6
         with:

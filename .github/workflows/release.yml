@@ -60,6 +60,11 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          target: ${{ matrix.target }}
+
       - name: Package
         shell: bash
         run: bash scripts/package.sh "$GITHUB_REF_NAME" ${{ matrix.name }} ${{ matrix.target }}
@@ -79,10 +84,17 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+
+      # The packages include FFmpeg, so its source goes beside them, as the
+      # LGPL asks.
+      - name: Add the FFmpeg source
+        run: bash scripts/ffmpeg.sh source dist
 
       # A draft, so the release can be checked before it's published.
       - name: Create a draft release
