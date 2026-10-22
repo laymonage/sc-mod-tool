@@ -58,10 +58,11 @@ pub(super) fn stream_segment(bank_path: &str, offset: u64, sample_count: u32) ->
 
 /// A replacement of `sample_count` samples of silence for the stream at
 /// `offset`.
-pub(super) fn replacement(offset: u64, sample_count: u32) -> Replacement {
+pub(super) fn replacement(file: &str, offset: u64, sample_count: u32) -> Replacement {
     Replacement {
         source: PathBuf::from("line.wav"),
         fit: FitOptions::default(),
+        file: file.to_owned(),
         offset,
         stream: Arc::from(vec![offset as u8; 4]),
         sample_count,

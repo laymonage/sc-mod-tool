@@ -1,8 +1,8 @@
 # Editing sounds: notes
 
-**Status:** SC Mod Tool replaces dialogue in the numbered `.LS0` banks, at
-the original length or at another. Sounds stored in maps, and the other
-codecs, can't be replaced yet. These notes collect what's known about
+**Status:** SC Mod Tool replaces dialogue in the numbered `.LS0` banks, and
+Lambert's alarm warnings in `Music_Common.LS0`, at the original length or at
+another. Sounds stored in maps, and the other codecs, can't be replaced yet. These notes collect what's known about
 replacing sounds. They build on [sound maps](sound-maps.md) and
 [sound banks](sound-banks.md).
 
@@ -57,6 +57,15 @@ resource pointing into the bank is changed to match, in every area of the
 `MAPS.LM0` beside it: its offset, both sizes and its sample count. No
 `MAPS.SM0` points into a numbered bank, so that's the only map that changes.
 
+`Music_Common.LS0` is saved the same way. Its lines are sounds in the map,
+which vgmstream finds by number, so the app reads where each one's stream is
+from the map's resources: its key, file, offset and size. Every resource with
+its key and file must be Ubisoft ADPCM audio and agree on where the stream is,
+and no other sound may play the same stream, or it can't be replaced. The
+game's maps meet that: in each language's, the audio resources in the file
+have 4 keys, one for each stream, repeated across areas. The 36 other keys
+naming it are switches' and random choices', whose file name is left over.
+
 This relies on the banks' simple layout ([sound banks](sound-banks.md)). So
 before the app accepts a replacement of another length, it checks that only
 padding follows the stream, that the map is there, and that every resource
@@ -89,14 +98,12 @@ stay in the folder, even if their replacements were reverted since.
 
 ## Then
 
-1. **Sounds in other files.** `Music_Common.LS0`, Lambert's alarm lines, uses
-   the same codec as dialogue, so it can be replaced the same way.
-2. **Sounds inside maps.** A clip of the same length can be spliced in.
+1. **Sounds inside maps.** A clip of the same length can be spliced in.
    Another length means rewriting the map's area offsets and sizes, or moving
    the clip out to a separate file.
-3. **Ubisoft IMA ADPCM**, for barks and guards' alerts, needs its own
-   encoder.
-4. **Replacing many segments at once.** Before a replacement of another
+2. **Ubisoft IMA ADPCM**, for barks, guards' alerts and the other
+   `Music_*.LS0` files, needs its own encoder.
+3. **Replacing many segments at once.** Before a replacement of another
    length is accepted, the app checks that its stream can move, which reads
    the bank and the `MAPS.LM0` beside it, 35 MB for a language. That's fine
    for one replacement at a time, but a bulk replacement should keep each

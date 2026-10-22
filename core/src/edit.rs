@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::banks::scan_ls0;
 use crate::encoder::{STREAM_HEADER_SIZE, StreamHeader, encode_stream};
-use crate::sound_map_file::{AUDIO, SoundMapFile, file_name, read_u32};
+use crate::sound_map_file::{
+    OFFSET, Placement, SAMPLE_COUNT, SIZE, SIZE_AGAIN, SoundMapFile, audio_resource,
+};
 use crate::sounds_folder::{find_file, find_sounds_directory, safe_child_path};
 use crate::{Error, Segment, decoder, read_segment_with_cancel};
 
@@ -66,8 +68,8 @@ impl SaveReport {
     }
 }
 
-/// Encodes `samples` as a replacement for `segment`, a stream in the `.LS0`
-/// bank at `bank_path`, keeping its header.
+/// Encodes `samples` as a replacement for `segment`, a segment of the bank at
+/// `bank_path` whose stream can be replaced, keeping the stream's header.
 pub fn encode_replacement(
     root: &Path,
     bank_path: &str,
@@ -75,18 +77,15 @@ pub fn encode_replacement(
     samples: &[i16],
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>, Error> {
-    let (offset, _) = segment
-        .stream_range()
-        .ok_or("Only streams in numbered .LS0 banks can be replaced.")?;
-    let header = read_segment_with_cancel(
-        root,
-        bank_path,
-        offset,
-        STREAM_HEADER_SIZE as u64,
-        cancelled,
-    )?;
+    let (file, offset, _) = segment.replaceable_stream(bank_path).ok_or(CANT_REPLACE)?;
+    let header =
+        read_segment_with_cancel(root, file, offset, STREAM_HEADER_SIZE as u64, cancelled)?;
     encode_stream(&StreamHeader::parse(&header)?, samples, cancelled)
 }
+
+/// Why a segment can't be replaced.
+pub const CANT_REPLACE: &str =
+    "Only voice lines in .LS0 files can be replaced: the numbered banks' and Music_Common.LS0's.";
 
 /// A file [`save`] writes.
 struct Output {
@@ -417,15 +416,6 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
-/// Where a stream is in its bank, and how many samples it has: what a sound
-/// map's resource says about it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Placement {
-    pub(crate) offset: u64,
-    pub(crate) length: u64,
-    pub(crate) sample_count: u32,
-}
-
 impl Placement {
     fn of(segment: &Segment) -> Option<Self> {
         let (offset, length) = segment.stream_range()?;
@@ -621,13 +611,6 @@ pub fn check_length_change(
     Ok(())
 }
 
-/// The fields of an audio resource that place its stream in its file.
-const SIZE: usize = 12;
-const OFFSET: usize = 20;
-const SAMPLE_COUNT: usize = 48;
-/// The size again.
-const SIZE_AGAIN: usize = 52;
-
 /// A bank's file name, and its streams' placements before and after it was
 /// rebuilt, in the same order.
 pub(crate) type MovedStreams<'a> = (&'a str, &'a [Placement], &'a [Placement]);
@@ -690,38 +673,18 @@ fn resources_in(
     let mut found = Vec::new();
     for area in file.areas() {
         for resource in file.resources(area) {
-            if read_u32(map, resource + 4) != Some(AUDIO) {
-                continue;
-            }
-            let Some(name) = file_name(map, resource) else {
+            let Some(audio) = audio_resource(map, resource) else {
                 continue;
             };
-            let Some(bank) = banks
-                .iter()
-                .position(|(bank_file, _)| bank_file.as_bytes().eq_ignore_ascii_case(name))
-            else {
+            let Some(bank) = banks.iter().position(|(bank_file, _)| {
+                bank_file.as_bytes().eq_ignore_ascii_case(audio.file_name)
+            }) else {
                 continue;
             };
             let (bank_file, streams) = banks[bank];
-            let read = |field| read_u32(map, resource + field);
-            let stream = match (
-                read(OFFSET),
-                read(SIZE),
-                read(SIZE_AGAIN),
-                read(SAMPLE_COUNT),
-            ) {
-                (Some(offset), Some(length), Some(again), Some(sample_count))
-                    if length == again =>
-                {
-                    let placement = Placement {
-                        offset: offset.into(),
-                        length: length.into(),
-                        sample_count,
-                    };
-                    streams.iter().position(|stream| *stream == placement)
-                }
-                _ => None,
-            };
+            let stream = audio
+                .placement
+                .and_then(|placement| streams.iter().position(|stream| *stream == placement));
             let Some(stream) = stream else {
                 return Err(format!(
                     "{map_path} has a sound in {bank_file} that isn't one of the streams found \
@@ -740,7 +703,7 @@ mod tests {
     use super::*;
     use crate::SegmentSource;
     use crate::sound_map_file::tests::write_u32;
-    use crate::sound_map_file::{AREA_SIZE, RESOURCE_SIZE};
+    use crate::sound_map_file::{AREA_SIZE, AUDIO, RESOURCE_SIZE};
 
     fn template() -> StreamHeader {
         StreamHeader::parse(&crate::tests::make_segment()).unwrap()
@@ -1589,6 +1552,94 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Replaces the first stream in every language's `Music_Common.LS0`, and
+    /// each extra map's, with a longer one, through the map sound that plays
+    /// it, and checks that the bank and the map beside it follow.
+    #[test]
+    #[ignore = "requires local Splinter Cell game files; set SC1_GAME_DIR"]
+    fn replaces_streams_in_music_common() {
+        let game_root = std::env::var_os("SC1_GAME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Splinter Cell"));
+        let cancelled = AtomicBool::new(false);
+        let sounds = find_sounds_directory(&game_root).unwrap();
+        let mut edits = Vec::new();
+        let languages = crate::discover_languages(&game_root).unwrap();
+        assert!(languages.len() > 1);
+        for language in &languages {
+            let banks = crate::discover_banks(&game_root, &language.directory).unwrap();
+            let before = edits.len();
+            for bank in &banks {
+                let streams: Vec<_> = bank
+                    .segments
+                    .iter()
+                    .filter_map(|segment| Some((segment, segment.replaceable_stream(&bank.path)?)))
+                    .collect();
+                if bank.sound_kind.is_none() || streams.is_empty() {
+                    continue;
+                }
+                // The scan finds the streams the map points at, and no others.
+                let (file, ..) = streams[0].1;
+                let mut found: Vec<_> = streams
+                    .iter()
+                    .map(|(segment, (path, offset, length))| {
+                        assert_eq!(*path, file, "{}", segment.id);
+                        Placement {
+                            offset: *offset,
+                            length: *length,
+                            sample_count: segment.sample_count,
+                        }
+                    })
+                    .collect();
+                // Each is a stream of its own.
+                found.sort_by_key(|placement| placement.offset);
+                let count = found.len();
+                found.dedup_by_key(|placement| placement.offset);
+                assert_eq!(found.len(), count, "{file}");
+                assert_eq!(
+                    found,
+                    placements(&fs::read(sounds.join(file)).unwrap()),
+                    "{file}"
+                );
+
+                let (segment, _) = streams
+                    .iter()
+                    .find(|(_, (_, offset, _))| *offset == 0)
+                    .unwrap();
+                let samples = tone(segment.sample_count as usize + 5000, 6000.0);
+                let stream =
+                    encode_replacement(&game_root, &bank.path, segment, &samples, &cancelled)
+                        .unwrap();
+                check_length_change(&game_root, file, 0, &cancelled).unwrap();
+                edits.push(BankEdit {
+                    path: file.to_owned(),
+                    replacements: vec![Replacement { offset: 0, stream }],
+                });
+            }
+            // At least the language's own.
+            assert!(edits.len() > before, "{}", language.directory);
+        }
+
+        let output = tempfile::tempdir().unwrap();
+        let target = SaveTarget::Folder(output.path().to_owned());
+        let report = save(&game_root, &edits, &target, &cancelled).unwrap();
+        assert!(report.is_complete(), "{:?}", report.failures);
+        assert_eq!(report.maps.len(), edits.len(), "{:?}", report.maps);
+        let exported = output.path().canonicalize().unwrap().join("Sounds");
+        for edit in &edits {
+            let (folder, file) = edit.path.rsplit_once('/').unwrap();
+            let map = fs::read(exported.join(folder).join("MAPS.LM0")).unwrap();
+            let saved = placements(&fs::read(exported.join(&edit.path)).unwrap());
+            assert!(saved[0].sample_count > 0);
+            let found = resources_in(&map, "", &[(file, &saved)]).unwrap();
+            assert!(
+                found.iter().any(|&(_, _, stream)| stream == 0),
+                "{}",
+                edit.path
+            );
         }
     }
 }

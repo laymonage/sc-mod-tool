@@ -98,6 +98,12 @@ The [extra maps](README.md#extra-maps)' banks differ in two ways:
 The extra maps' language folders have their own `Music_Common.LS0` and
 `Music_Georgie.LS0`.
 
+`Music_Common.LS0` is laid out like a numeric bank: its streams start at 0,
+with only padding between them, and 4-bit codes in the languages' folders and
+6-bit in the extra maps'. Only the `MAPS.LM0` beside it points into it. So its
+lines can be replaced like dialogue's
+([editing notes](editing-notes.md#how-saving-works)).
+
 ## Stream files: `.SS0`
 
 | File | Holds |

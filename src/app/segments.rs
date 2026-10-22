@@ -227,7 +227,7 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:1",
-            crate::app::test_support::replacement(0, 4000),
+            crate::app::test_support::replacement("ENGLISH/1_1_0.LS0", 0, 4000),
         );
         assert_eq!(app.visible_segments(), [2, 0, 1]);
 

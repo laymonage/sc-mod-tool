@@ -101,7 +101,20 @@ pub enum SegmentSource {
         key: Option<u32>,
         /// The map's areas that play the sound.
         areas: Vec<Area>,
+        /// The sound's stream, if it's one that can be replaced: a Ubisoft
+        /// ADPCM stream in an `.LS0` file, such as Lambert's alarm warnings
+        /// in `Music_Common.LS0`.
+        stream: Option<FileStream>,
     },
+}
+
+/// A stream in a file other than the sound map that plays it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileStream {
+    /// The file, relative to `Sounds`, such as `ENGLISH/Music_Common.LS0`.
+    pub path: String,
+    pub offset: u64,
+    pub byte_length: u64,
 }
 
 /// One of a sound map's areas, such as `1_1_0Tbilisi`: one for each level,
@@ -125,6 +138,21 @@ impl Segment {
                 byte_length,
             } => Some((offset, byte_length)),
             SegmentSource::MapSound { .. } => None,
+        }
+    }
+
+    /// The `.LS0` file holding the segment's stream, relative to `Sounds`,
+    /// and the stream's offset and length in it, if it can be replaced.
+    /// `bank_path` is the path of the segment's bank.
+    pub fn replaceable_stream<'a>(&'a self, bank_path: &'a str) -> Option<(&'a str, u64, u64)> {
+        match &self.source {
+            SegmentSource::Stream {
+                offset,
+                byte_length,
+            } => Some((bank_path, *offset, *byte_length)),
+            SegmentSource::MapSound { stream, .. } => stream
+                .as_ref()
+                .map(|stream| (stream.path.as_str(), stream.offset, stream.byte_length)),
         }
     }
 }

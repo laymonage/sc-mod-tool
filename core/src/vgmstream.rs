@@ -384,6 +384,10 @@ impl SharedFile {
         }))
     }
 
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.map
+    }
+
     fn is_named(&self, relative_path: &str) -> bool {
         self.name.to_str() == Ok(relative_path)
     }

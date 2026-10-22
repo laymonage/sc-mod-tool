@@ -1,7 +1,7 @@
 //! Replacing segments: the replacements made but not saved yet, preparing one
 //! from an audio file, and saving them over the game's files or into a folder.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +27,10 @@ pub(super) struct Replacement {
     /// The audio file it was made from.
     pub(super) source: PathBuf,
     pub(super) fit: FitOptions,
-    /// Where the stream it replaces starts in its bank.
+    /// The file holding the stream it replaces, relative to `Sounds`: its
+    /// bank, or for a map's sound, the file the map points at.
+    pub(super) file: String,
+    /// Where the stream it replaces starts in its file.
     pub(super) offset: u64,
     pub(super) stream: Arc<[u8]>,
     pub(super) sample_count: u32,
@@ -102,9 +105,16 @@ impl PendingEdits {
             .any(|replacement| replacement.changes_length)
     }
 
-    /// How many banks have replacements.
-    pub(super) fn bank_count(&self) -> usize {
-        self.banks.len()
+    /// How many files the replacements go into: banks, or for a map's
+    /// sounds, the files the map points at.
+    pub(super) fn file_count(&self) -> usize {
+        let files: BTreeSet<_> = self
+            .banks
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|replacement| &replacement.file)
+            .collect();
+        files.len()
     }
 
     /// How many of the bank's segments are replaced.
@@ -119,28 +129,35 @@ impl PendingEdits {
         self.unsaved && !self.banks.is_empty()
     }
 
+    /// The replacements, by the file each goes into.
     fn bank_edits(&self) -> Vec<BankEdit> {
-        self.banks
-            .iter()
+        let mut files = BTreeMap::<&str, Vec<edit::Replacement>>::new();
+        for replacement in self.banks.values().flat_map(BTreeMap::values) {
+            files
+                .entry(&replacement.file)
+                .or_default()
+                .push(edit::Replacement {
+                    offset: replacement.offset,
+                    stream: replacement.stream.to_vec(),
+                });
+        }
+        files
+            .into_iter()
             .map(|(path, replacements)| BankEdit {
-                path: path.clone(),
-                replacements: replacements
-                    .values()
-                    .map(|replacement| edit::Replacement {
-                        offset: replacement.offset,
-                        stream: replacement.stream.to_vec(),
-                    })
-                    .collect(),
+                path: path.to_owned(),
+                replacements,
             })
             .collect()
     }
 
-    /// Forgets the banks `saved` over the game's files, which now hold their
-    /// replacements.
+    /// Forgets the replacements in the files `saved` over the game's, which
+    /// now hold them.
     fn saved_in_place(&mut self, saved: &[String]) {
-        for path in saved {
-            self.banks.remove(path);
+        for replacements in self.banks.values_mut() {
+            replacements.retain(|_, replacement| !saved.contains(&replacement.file));
         }
+        self.banks
+            .retain(|_, replacements| !replacements.is_empty());
         self.unsaved = !self.banks.is_empty();
     }
 
@@ -186,8 +203,8 @@ impl ReplacementDraft {
     /// A draft for `segment`, with a replacement of `sample_count` samples
     /// already prepared for its options.
     pub(super) fn prepared(bank_path: &str, segment: Segment, sample_count: u32) -> Self {
-        let offset = segment.stream_range().unwrap().0;
-        let mut prepared = super::test_support::replacement(offset, sample_count);
+        let (file, offset, _) = segment.replaceable_stream(bank_path).unwrap();
+        let mut prepared = super::test_support::replacement(file, offset, sample_count);
         prepared.changes_length = sample_count != segment.sample_count;
         Self {
             bank_path: bank_path.to_owned(),
@@ -270,8 +287,8 @@ impl SCModToolApp {
         let Some(segment) = bank.segments.get(segment_index).cloned() else {
             return;
         };
-        if segment.stream_range().is_none() {
-            self.set_status("Only segments in numbered banks can be replaced.", true);
+        if segment.replaceable_stream(&bank.path).is_none() {
+            self.set_status(edit::CANT_REPLACE, true);
             return;
         }
         let bank_path = bank.path.clone();
@@ -482,7 +499,7 @@ impl SCModToolApp {
     pub(super) fn revert_bank(&mut self, bank_path: &str) {
         if self
             .loaded_segment_id()
-            .is_some_and(|id| id.starts_with(&format!("{bank_path}:")))
+            .is_some_and(|id| self.edits.get(bank_path, id).is_some())
         {
             self.clear_playback();
         }
@@ -779,9 +796,9 @@ fn prepare(
     fit: FitOptions,
     cancel: &AtomicBool,
 ) -> Result<Replacement, Error> {
-    let (offset, _) = segment
-        .stream_range()
-        .ok_or("Only segments in numbered banks can be replaced.")?;
+    let (file, offset, _) = segment
+        .replaceable_stream(bank_path)
+        .ok_or(edit::CANT_REPLACE)?;
     let fitted = convert::fit(
         ffmpeg,
         samples,
@@ -792,7 +809,7 @@ fn prepare(
     )?;
     if fitted.len() != segment.sample_count as usize {
         // Checked now, as a save with it would fail.
-        edit::check_length_change(root, bank_path, offset, cancel).map_err(cant_change_length)?;
+        edit::check_length_change(root, file, offset, cancel).map_err(cant_change_length)?;
     }
     let stream = edit::encode_replacement(root, bank_path, segment, &fitted, cancel)?;
     let sample_count = fitted.len() as u32;
@@ -800,6 +817,7 @@ fn prepare(
     Ok(Replacement {
         source: source.to_owned(),
         fit,
+        file: file.to_owned(),
         offset,
         stream: stream.into(),
         sample_count,
@@ -832,14 +850,18 @@ mod tests {
         edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:200",
-            replacement(200, 10),
+            replacement("ENGLISH/1_1_0.LS0", 200, 10),
         );
-        edits.insert("GERMAN/1_1_0.LS0", "GERMAN/1_1_0.LS0:0", replacement(0, 10));
+        edits.insert(
+            "GERMAN/1_1_0.LS0",
+            "GERMAN/1_1_0.LS0:0",
+            replacement("GERMAN/1_1_0.LS0", 0, 10),
+        );
         assert_eq!(edits.len(), 3);
         assert_eq!(edits.bank_len("ENGLISH/1_1_0.LS0"), 2);
         assert!(edits.has_unsaved());
@@ -864,19 +886,56 @@ mod tests {
     }
 
     #[test]
+    fn a_map_sounds_replacement_goes_into_its_streams_file() {
+        let mut edits = PendingEdits::default();
+        let file = "ENGLISH/Music_Common.LS0";
+        edits.insert(
+            "ENGLISH/MAPS.LM0",
+            "ENGLISH/MAPS.LM0#7",
+            replacement(file, 0, 10),
+        );
+        edits.insert(
+            "ENGLISH/MAPS.LM0",
+            "ENGLISH/MAPS.LM0#9",
+            replacement(file, 400, 10),
+        );
+        edits.insert(
+            "ENGLISH/1_1_0.LS0",
+            "ENGLISH/1_1_0.LS0:0",
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
+        );
+        assert_eq!(edits.file_count(), 2);
+        let banks = edits.bank_edits();
+        let files: Vec<_> = banks
+            .iter()
+            .map(|bank| (bank.path.as_str(), bank.replacements.len()))
+            .collect();
+        assert_eq!(files, [("ENGLISH/1_1_0.LS0", 1), (file, 2)]);
+
+        edits.saved_in_place(&[file.to_owned()]);
+        assert!(
+            edits
+                .get("ENGLISH/MAPS.LM0", "ENGLISH/MAPS.LM0#7")
+                .is_none()
+        );
+        assert_eq!(edits.len(), 1);
+        assert!(edits.has_unsaved());
+    }
+
+    #[test]
     fn reverting_everything_leaves_nothing_unsaved() {
         let mut edits = PendingEdits::default();
         edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         edits.remove("ENGLISH/1_1_0.LS0", "ENGLISH/1_1_0.LS0:0");
         assert!(!edits.has_unsaved());
         edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         edits.remove_bank("ENGLISH/1_1_0.LS0");
         assert!(!edits.has_unsaved());
@@ -910,7 +969,7 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         app.scan_cancel = Some(Arc::default());
         app.unsaved_prompt = Some(GuardedAction::Quit);
@@ -940,9 +999,13 @@ mod tests {
         edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
-        edits.insert("GERMAN/1_1_0.LS0", "GERMAN/1_1_0.LS0:0", replacement(0, 10));
+        edits.insert(
+            "GERMAN/1_1_0.LS0",
+            "GERMAN/1_1_0.LS0:0",
+            replacement("GERMAN/1_1_0.LS0", 0, 10),
+        );
         edits.exported();
         assert!(!edits.has_unsaved());
         assert_eq!(edits.len(), 2);
@@ -1047,7 +1110,7 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         let other = GuardedAction::OpenRoot(PathBuf::from("other game"));
         app.guard(&ctx, other.clone());
@@ -1072,12 +1135,12 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         app.edits.insert(
             "ENGLISH/1_1_1.LS0",
             "ENGLISH/1_1_1.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_1.LS0", 0, 10),
         );
         app.save_job = Some(SaveJob {
             target: SaveTarget::InPlace,
@@ -1116,7 +1179,7 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         app.save_job = Some(SaveJob {
             target: SaveTarget::Folder(PathBuf::from("mod")),
@@ -1142,7 +1205,7 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         app.save_job = Some(SaveJob {
             target: SaveTarget::InPlace,
@@ -1166,12 +1229,12 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         app.edits.insert(
             "ENGLISH/1_1_1.LS0",
             "ENGLISH/1_1_1.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_1.LS0", 0, 10),
         );
         app.save_job = Some(SaveJob {
             target: SaveTarget::InPlace,
@@ -1199,7 +1262,7 @@ mod tests {
         let mut app = SCModToolApp::new(None);
         let ctx = egui::Context::default();
         app.save_confirmed = true;
-        let mut longer = replacement(0, 12);
+        let mut longer = replacement("ENGLISH/1_1_0.LS0", 0, 12);
         longer.changes_length = true;
         app.edits
             .insert("ENGLISH/1_1_0.LS0", "ENGLISH/1_1_0.LS0:0", longer);
@@ -1251,7 +1314,7 @@ mod tests {
         app.edits.insert(
             "ENGLISH/1_1_0.LS0",
             "ENGLISH/1_1_0.LS0:0",
-            replacement(0, 10),
+            replacement("ENGLISH/1_1_0.LS0", 0, 10),
         );
         app.scan_cancel = Some(Arc::default());
         app.save_in_place(&ctx);
@@ -1394,6 +1457,50 @@ mod tests {
                 .join("MAPS.LM0")
                 .exists()
         );
+
+        // One of Lambert's alarm warnings, a sound in the map whose stream is
+        // in Music_Common.LS0.
+        let (voices, alarm) = app
+            .banks
+            .iter()
+            .filter(|bank| bank.sound_kind.is_some())
+            .find_map(|bank| {
+                let segment = bank
+                    .segments
+                    .iter()
+                    .find(|segment| segment.replaceable_stream(&bank.path).is_some())?;
+                Some((bank.path.clone(), segment.clone()))
+            })
+            .unwrap();
+        let (file, ..) = alarm.replaceable_stream(&voices).unwrap();
+        let file = file.to_owned();
+        assert!(file.ends_with("Music_Common.LS0"), "{file}");
+        app.open_draft(
+            &ctx,
+            voices.clone(),
+            alarm.clone(),
+            scratch.join("tone.wav"),
+        );
+        wait(&mut app, &|app| {
+            app.draft.as_ref().is_some_and(|draft| !draft.is_busy())
+        });
+        app.apply_draft(&ctx);
+        wait(&mut app, &|app| {
+            app.draft.is_none() || app.draft.as_ref().unwrap().error.is_some()
+        });
+        assert!(
+            app.draft.is_none(),
+            "{:?}",
+            app.draft.as_ref().unwrap().error
+        );
+        assert_eq!(app.replacement(&voices, &alarm.id).unwrap().file, file);
+        app.start_save(&ctx, SaveTarget::Folder(scratch.join("out")), None);
+        wait(&mut app, &|app| !app.is_saving());
+        assert!(!app.status.is_error, "{}", app.status.message);
+        let original = std::fs::read(sounds.join(&file)).unwrap();
+        let saved = std::fs::read(scratch.join("out/Sounds").join(&file)).unwrap();
+        assert_eq!(saved.len(), original.len());
+        assert_ne!(saved, original);
         std::fs::remove_dir_all(&scratch).unwrap();
     }
 }

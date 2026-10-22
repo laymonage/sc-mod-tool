@@ -13,9 +13,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::missions::{leading_mission_code, mission_code};
+use crate::sound_map_file::{
+    Placement, SoundMapFile, UBISOFT_ADPCM, audio_resource, file_name, read_u32,
+};
 use crate::sounds_folder::find_file;
 use crate::vgmstream::{SharedFile, SoundInfo, Vgmstream};
-use crate::{Area, Bank, Error, Segment, SegmentSource};
+use crate::{Area, Bank, Error, FileStream, Segment, SegmentSource};
 
 /// The map files, relative to `Sounds`, that have the sounds for a language
 /// folder, such as `MAPS.SM0` and `ENGLISH/MAPS.LM0`.
@@ -114,8 +117,11 @@ pub(crate) fn read_map_banks(
         }
     }
 
+    let mut lists = lists.into_sorted();
+    let streams = file_streams(map_file.bytes());
+    let mut segments: Vec<_> = lists.values_mut().flatten().collect();
+    add_file_streams(sounds, path, &streams, &mut segments);
     let mut banks: Vec<_> = lists
-        .into_sorted()
         .into_iter()
         .map(|(kind, segments)| Bank {
             name: kind.label().to_owned(),
@@ -135,6 +141,118 @@ pub(crate) fn read_map_banks(
         )));
     }
     Ok(banks)
+}
+
+/// The Ubisoft ADPCM streams in `.LS0` files other than numeric banks that
+/// the map `map` points at, by the key and lowercase file name of the
+/// resources pointing at them. `None` where those resources disagree about
+/// the stream, or one of them isn't Ubisoft ADPCM audio.
+fn file_streams(map: &[u8]) -> HashMap<(u32, String), Option<Placement>> {
+    let mut streams = HashMap::new();
+    let Ok(file) = SoundMapFile::parse(map) else {
+        return streams;
+    };
+    for area in file.areas() {
+        for resource in file.resources(area) {
+            let (key, name, placement) = match audio_resource(map, resource) {
+                Some(audio) => (
+                    audio.key,
+                    audio.file_name,
+                    audio
+                        .placement
+                        .filter(|_| audio.codec == Some(UBISOFT_ADPCM)),
+                ),
+                // Another kind of resource, which may keep a file name left
+                // over from the resource before it.
+                None => match (read_u32(map, resource), file_name(map, resource)) {
+                    (Some(key), Some(name)) => (key, name, None),
+                    _ => continue,
+                },
+            };
+            let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+            if !name.ends_with(".ls0") || mission_code(&name).is_some() {
+                continue;
+            }
+            streams
+                .entry((key, name))
+                .and_modify(|known: &mut Option<Placement>| {
+                    if *known != placement {
+                        *known = None;
+                    }
+                })
+                .or_insert(placement);
+        }
+    }
+    streams
+}
+
+/// Notes where each of `segments`' audio is, sounds in the map at `path`, if
+/// it's one of `streams`: a stream in an `.LS0` file beside the map, which can
+/// be replaced. A stream two sounds play isn't noted for either, so that
+/// replacing a sound never changes another.
+fn add_file_streams(
+    sounds: &Path,
+    path: &str,
+    streams: &HashMap<(u32, String), Option<Placement>>,
+    segments: &mut [&mut Segment],
+) {
+    let folder = path.rsplit_once('/').map_or("", |(folder, _)| folder);
+    // Each file's path relative to `Sounds`, by its lowercase name.
+    let mut files = HashMap::<String, Option<String>>::new();
+    for segment in segments.iter_mut() {
+        let SegmentSource::MapSound {
+            key: Some(key),
+            stream,
+            ..
+        } = &mut segment.source
+        else {
+            continue;
+        };
+        // A sound in a stream file is named after the file.
+        let Some(name) = segment.name.as_deref().map(str::to_ascii_lowercase) else {
+            continue;
+        };
+        let Some(&Some(placement)) = streams.get(&(*key, name.clone())) else {
+            continue;
+        };
+        let file = files.entry(name).or_insert_with_key(|name| {
+            let found = find_file(&sounds.join(folder), name).ok()?;
+            let name = found.file_name()?.to_str()?;
+            Some(if folder.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{folder}/{name}")
+            })
+        });
+        if let Some(file) = file
+            && placement.sample_count == segment.sample_count
+        {
+            *stream = Some(FileStream {
+                path: file.clone(),
+                offset: placement.offset,
+                byte_length: placement.length,
+            });
+        }
+    }
+
+    let stream = |segment: &Segment| match &segment.source {
+        SegmentSource::MapSound {
+            stream: Some(stream),
+            ..
+        } => Some((stream.path.clone(), stream.offset)),
+        _ => None,
+    };
+    let mut counts = HashMap::<(String, u64), usize>::new();
+    for found in segments.iter().filter_map(|segment| stream(segment)) {
+        *counts.entry(found).or_default() += 1;
+    }
+    for segment in segments.iter_mut() {
+        if stream(segment).is_some_and(|found| counts[&found] > 1)
+            && let SegmentSource::MapSound { stream, .. } = &mut segment.source
+        {
+            *stream = None;
+        }
+    }
 }
 
 /// The area named `name`. Its mission name depends on the language, so it's
@@ -204,6 +322,7 @@ impl SoundLists {
                     .filter(|area| !area.is_empty())
                     .map(area)
                     .collect(),
+                stream: None,
             },
             name: Some(name),
             sample_count: info.sample_count,
@@ -409,6 +528,98 @@ mod tests {
         assert_eq!(unexpected.area, "");
         assert_eq!(unexpected.key, None);
         assert_eq!(unexpected.display_name(), "TAWCHI02");
+    }
+
+    #[test]
+    fn finds_streams_in_ls0_files() {
+        use crate::sound_map_file::tests::{test_map, write_u32};
+        use crate::sound_map_file::{AREA_SIZE, CODEC, OFFSET, RESOURCE_SIZE};
+
+        // Resources by key, file, codec, and type if not audio.
+        let resources: [(u32, &str, u32, Option<u32>); 8] = [
+            (1, "Music_Common.LS0", UBISOFT_ADPCM, None),
+            // The same key twice, at different streams.
+            (2, "Music_Common.LS0", UBISOFT_ADPCM, None),
+            (2, "Music_Common.LS0", UBISOFT_ADPCM, None),
+            // The same key in another codec.
+            (3, "Music_Common.LS0", UBISOFT_ADPCM, None),
+            (3, "Music_Common.LS0", 4, None),
+            // The same key in a switch, with a leftover file name.
+            (4, "Music_Common.LS0", UBISOFT_ADPCM, None),
+            (4, "Music_Common.LS0", UBISOFT_ADPCM, Some(8)),
+            (5, "1_1_0.LS0", UBISOFT_ADPCM, None),
+        ];
+        let mut map = test_map(&[], &resources.map(|(key, ..)| key));
+        let first = 0x0c + AREA_SIZE + 0x24;
+        for (index, (_, name, codec, kind)) in resources.into_iter().enumerate() {
+            let resource = first + index * RESOURCE_SIZE;
+            let name = format!("{name}\0");
+            map[resource + 80..resource + 80 + name.len()].copy_from_slice(name.as_bytes());
+            write_u32(&mut map, resource + CODEC, codec);
+            write_u32(&mut map, resource + OFFSET, index as u32 * 1000);
+            if let Some(kind) = kind {
+                write_u32(&mut map, resource + 4, kind);
+            }
+        }
+        let streams = file_streams(&map);
+        let common = |key| streams.get(&(key, "music_common.ls0".to_owned())).copied();
+        let first = Placement {
+            offset: 0,
+            length: 15_571,
+            sample_count: 29_967,
+        };
+        assert_eq!(common(1), Some(Some(first)));
+        for key in [2, 3, 4] {
+            assert_eq!(common(key), Some(None), "{key}");
+        }
+        // Numeric banks' streams are found by scanning them instead.
+        assert_eq!(streams.len(), 4);
+
+        // Two sounds playing one stream can't be replaced.
+        let sound = |key, name: &str| Segment {
+            id: format!("ENGLISH/MAPS.LM0#{key}"),
+            source: SegmentSource::MapSound {
+                subsong: key,
+                key: Some(key),
+                areas: Vec::new(),
+                stream: None,
+            },
+            name: Some(name.to_owned()),
+            sample_count: 29_967,
+            sample_rate: 36_000,
+            channels: 1,
+            codec: String::new(),
+            segment: 0,
+        };
+        let game = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(game.path().join("ENGLISH")).unwrap();
+        std::fs::write(game.path().join("ENGLISH/Music_Common.LS0"), b"").unwrap();
+        let streams = HashMap::from([
+            ((1, "music_common.ls0".to_owned()), Some(first)),
+            ((6, "music_common.ls0".to_owned()), Some(first)),
+            (
+                (7, "music_common.ls0".to_owned()),
+                Some(Placement {
+                    offset: 2000,
+                    ..first
+                }),
+            ),
+        ]);
+        let mut sounds = [
+            sound(1, "Music_Common.LS0"),
+            sound(6, "MUSIC_COMMON.LS0"),
+            sound(7, "Music_Common.LS0"),
+        ];
+        let mut segments: Vec<_> = sounds.iter_mut().collect();
+        add_file_streams(game.path(), "ENGLISH/MAPS.LM0", &streams, &mut segments);
+        let found: Vec<_> = sounds
+            .iter()
+            .map(|sound| sound.replaceable_stream("ENGLISH/MAPS.LM0"))
+            .collect();
+        assert_eq!(
+            found,
+            [None, None, Some(("ENGLISH/Music_Common.LS0", 2000, 15_571))]
+        );
     }
 
     #[test]

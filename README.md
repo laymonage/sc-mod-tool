@@ -7,7 +7,8 @@ music and streams in the game's sound maps (`MAPS.SM0` and each language's
 `MAPS.LM0`), each sound once with the levels that use it. vgmstream decodes
 everything.
 
-Segments in the numeric banks can be replaced with any audio FFmpeg reads,
+Segments in the numeric banks, and Lambert's alarm warnings in
+`Music_Common.LS0`, can be replaced with any audio FFmpeg reads,
 trimmed, padded or sped up to the segment's length, or kept at its own length.
 A replacement of another length moves the segments after it in its bank, and
 the language's `MAPS.LM0` is changed to match. Replacements are kept until you

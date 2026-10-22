@@ -351,6 +351,7 @@ mod tests {
             subsong: 1,
             key: Some(0x660002),
             areas: Vec::new(),
+            stream: None,
         };
         banks.push(voices);
         let mut records = test_records(&[(0x660005, 0)]);

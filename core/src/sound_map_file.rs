@@ -17,6 +17,17 @@ pub(crate) const RESOURCE_REFERENCE: u32 = 0x4000_0000;
 /// The type of a resource that's a clip of audio.
 pub(crate) const AUDIO: u32 = 1;
 
+/// The fields of an audio resource that place its stream in its file.
+pub(crate) const SIZE: usize = 12;
+pub(crate) const OFFSET: usize = 20;
+pub(crate) const SAMPLE_COUNT: usize = 48;
+/// The size again.
+pub(crate) const SIZE_AGAIN: usize = 52;
+/// The field of an audio resource with its codec.
+pub(crate) const CODEC: usize = 76;
+/// The codec of Ubisoft ADPCM, which dialogue and Lambert's lines use.
+pub(crate) const UBISOFT_ADPCM: u32 = 2;
+
 /// A sound map's areas, events and resources.
 pub(crate) struct SoundMapFile<'a> {
     data: &'a [u8],
@@ -113,6 +124,44 @@ impl<'a> SoundMapFile<'a> {
         (reference & 0xF000_0000 == RESOURCE_REFERENCE && index < area.resource_count)
             .then(|| area.resources_offset + index * RESOURCE_SIZE)
     }
+}
+
+/// Where a stream is in its file, and how many samples it has: what a sound
+/// map's resource says about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Placement {
+    pub(crate) offset: u64,
+    pub(crate) length: u64,
+    pub(crate) sample_count: u32,
+}
+
+/// What an audio resource says about its audio.
+pub(crate) struct AudioResource<'a> {
+    pub(crate) key: u32,
+    pub(crate) codec: Option<u32>,
+    pub(crate) file_name: &'a [u8],
+    /// Where its stream is, unless the resource's two sizes disagree.
+    pub(crate) placement: Option<Placement>,
+}
+
+/// The audio resource at `position`, or `None` for another kind of resource
+/// or one without a file name.
+pub(crate) fn audio_resource(data: &[u8], position: usize) -> Option<AudioResource<'_>> {
+    let read = |field| read_u32(data, position + field);
+    if read(4)? != AUDIO {
+        return None;
+    }
+    let (offset, length, sample_count) = (read(OFFSET)?, read(SIZE)?, read(SAMPLE_COUNT)?);
+    Some(AudioResource {
+        key: read(0)?,
+        codec: read(CODEC),
+        file_name: file_name(data, position)?,
+        placement: (read(SIZE_AGAIN)? == length).then_some(Placement {
+            offset: offset.into(),
+            length: length.into(),
+            sample_count,
+        }),
+    })
 }
 
 pub(crate) fn read_u32(data: &[u8], position: usize) -> Option<u32> {

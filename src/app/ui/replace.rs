@@ -184,7 +184,7 @@ impl SCModToolApp {
         }
         let count = self.edits.len();
         let segments = if count == 1 { "segment" } else { "segments" };
-        let banks = match self.edits.bank_count() {
+        let banks = match self.edits.file_count() {
             1 => "1 bank".to_owned(),
             banks => format!("{banks} banks"),
         };
