@@ -26,27 +26,55 @@ pub(super) fn match_unshown_subtitles(
 ) {
     let lines = spoken_lines(sections, &pattern.pattern);
     let reference_lines = spoken_lines(reference_sections, &pattern.pattern);
-    let calls = pattern
+    let dialogue = pattern
         .calls
         .iter()
         .filter(|call| call.is_dialogue())
         .collect::<Vec<_>>();
     // Only scenes that speak lines without a subtitle are of interest.
-    if lines.is_empty() || calls.iter().all(|call| call.cue.is_some()) {
+    if lines.is_empty() || dialogue.iter().all(|call| call.cue.is_some()) {
         return;
     }
-    let durations = calls
+    // How many earlier dialogue calls in the same source object play the same
+    // sound, counting every call, as the scripts read.
+    let mut counts = HashMap::<(&str, &str), usize>::new();
+    let occurrences = dialogue
         .iter()
-        .map(|call| call.sound_map_key.and_then(|key| clip_seconds(key, maps)))
+        .map(|call| {
+            let count = counts
+                .entry((&call.source_object, &call.sound_event))
+                .or_default();
+            *count += 1;
+            *count - 1
+        })
         .collect::<Vec<_>>();
-
-    let matched = match align(&pattern.pattern, &calls, &reference_lines, &durations) {
-        Ok(alignment) => alignment
+    let align_with = |section_lines: &[&(String, String)]| {
+        let speaking = section_calls(&pattern.pattern, &dialogue, section_lines);
+        let calls = speaking
             .iter()
-            .map(|&line| cue_in_language(&reference_lines, line, &lines))
-            .collect::<Vec<_>>(),
-        Err(_) => match align(&pattern.pattern, &calls, &lines, &durations) {
-            Ok(alignment) => alignment.iter().map(|&line| Some(lines[line])).collect(),
+            .map(|&index| dialogue[index])
+            .collect::<Vec<_>>();
+        let durations = calls
+            .iter()
+            .map(|call| call.sound_map_key.and_then(|key| clip_seconds(key, maps)))
+            .collect::<Vec<_>>();
+        align(&pattern.pattern, &calls, section_lines, &durations)
+            .map(|alignment| (speaking, alignment))
+    };
+
+    let (speaking, matched) = match align_with(&reference_lines) {
+        Ok((speaking, alignment)) => (
+            speaking,
+            alignment
+                .iter()
+                .map(|&line| cue_in_language(&reference_lines, line, &lines))
+                .collect::<Vec<_>>(),
+        ),
+        Err(_) => match align_with(&lines) {
+            Ok((speaking, alignment)) => (
+                speaking,
+                alignment.iter().map(|&line| Some(lines[line])).collect(),
+            ),
             Err(warning) => {
                 push_warning(&mut analysis.warnings, warning);
                 return;
@@ -54,12 +82,8 @@ pub(super) fn match_unshown_subtitles(
         },
     };
 
-    let mut occurrences = HashMap::<(&str, &str), usize>::new();
-    for (call, line) in calls.iter().zip(matched) {
-        let occurrence = occurrences
-            .entry((&call.source_object, &call.sound_event))
-            .or_default();
-        *occurrence += 1;
+    for (index, line) in speaking.into_iter().zip(matched) {
+        let call = dialogue[index];
         let Some((cue, text)) = line else {
             continue;
         };
@@ -71,7 +95,7 @@ pub(super) fn match_unshown_subtitles(
             source_object: call.source_object.clone(),
             sound_event: call.sound_event.clone(),
             function: call.function.clone(),
-            occurrence: *occurrence - 1,
+            occurrence: occurrences[index],
             cue: cue.clone(),
             text: line_text(text),
             segments: Vec::new(),
@@ -126,6 +150,35 @@ fn spoken_lines<'a>(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The dialogue calls, by index, that speak a line of the scene's own section.
+///
+/// A radio message that names another scene's cue, or plays a cue more often
+/// than the section has lines for it, speaks a line counted elsewhere, so it
+/// doesn't take a position. EnhancedSC adds both: a game over that reuses
+/// another scene's warning, and a second branch that repeats a warning.
+fn section_calls(pattern: &str, calls: &[&BridgeCall], lines: &[&(String, String)]) -> Vec<usize> {
+    let mut played = HashMap::<String, usize>::new();
+    (0..calls.len())
+        .filter(|&index| match (&calls[index].section, &calls[index].cue) {
+            (Some(section), Some(cue)) => {
+                if !section.eq_ignore_ascii_case(pattern) {
+                    return false;
+                }
+                let available = lines
+                    .iter()
+                    .filter(|(key, _)| key.eq_ignore_ascii_case(cue))
+                    .count();
+                let count = played.entry(cue.to_ascii_lowercase()).or_default();
+                *count += 1;
+                // A cue the section lacks keeps its position, so the
+                // alignment fails its anchor check instead of hiding it.
+                available == 0 || *count <= available
+            }
+            _ => true,
+        })
+        .collect()
 }
 
 /// Lines a scene's dialogue calls up with a section's spoken lines, returning
@@ -598,6 +651,88 @@ mod tests {
                     "Speech_0001L",
                     &["ENGLISH/1_1_2.LS0:200".to_owned()][..]
                 ),
+            ]
+        );
+    }
+
+    /// The cues of the unshown lines a scene is matched to.
+    fn unshown_cues(pattern: &BridgePattern, section: &str) -> Vec<(String, String)> {
+        let banks = test_bank(&[0, 100, 200, 300]);
+        let records = test_records(&[(1, 0), (2, 100), (3, 200), (4, 300)]);
+        let mut sections = HashMap::new();
+        parse_sections(section, &mut sections);
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            pattern,
+            &sections,
+            &sections,
+            &test_maps(records, &banks),
+        );
+
+        assert!(analysis.warnings.is_empty(), "{:?}", analysis.warnings);
+        analysis
+            .unshown_lines
+            .iter()
+            .map(|line| (line.sound_event.clone(), line.cue.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn a_repeated_radio_message_takes_one_line() {
+        // EnhancedSC's Hidebody06 plays a warning from a second branch, and
+        // its section has the warning once.
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_B", 2, Some("Speech_0002L")),
+                test_call("S1_1_2Voice.Play_B", 2, Some("Speech_0002L")),
+                test_call("S1_1_2Voice.Play_C", 3, None),
+            ],
+        };
+
+        let cues = unshown_cues(
+            &pattern,
+            "[P_Talk]\nSpeech_0001L=Heard you.\nSpeech_0002L=Try again.\nSpeech_0003L=Saw you.\n",
+        );
+
+        assert_eq!(
+            cues,
+            [
+                ("S1_1_2Voice.Play_A".to_owned(), "Speech_0001L".to_owned()),
+                ("S1_1_2Voice.Play_C".to_owned(), "Speech_0003L".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_radio_message_from_another_scene_takes_no_line() {
+        // EnhancedSC's NikoCrisCurtain plays another scene's game over warning.
+        let mut borrowed = test_call("S5_1_Voice.Play_X", 4, Some("Speech_0014L"));
+        borrowed.section = Some("P_Other".to_owned());
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                borrowed,
+                test_call("S1_1_2Voice.Play_B", 2, None),
+            ],
+        };
+
+        let cues = unshown_cues(
+            &pattern,
+            "[P_Talk]\nSpeech_0001L=Hello.\nSpeech_0002L=Goodbye.\n",
+        );
+
+        assert_eq!(
+            cues,
+            [
+                ("S1_1_2Voice.Play_A".to_owned(), "Speech_0001L".to_owned()),
+                ("S1_1_2Voice.Play_B".to_owned(), "Speech_0002L".to_owned()),
             ]
         );
     }
