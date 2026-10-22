@@ -1,9 +1,12 @@
-//! Writes every line the game plays without a subtitle, with the cue it was
+//! Writes every line EnhancedSC plays without a subtitle, with the cue it was
 //! matched to, as JSON.
 //!
 //! ```sh
 //! cargo run -p sc-mod-tool-core --release --example dump_unshown_lines -- <game dir> [output.json]
 //! ```
+//!
+//! The game directory needs EnhancedSC installed: its scripts and
+//! localization in `system/Enhanced` are read in place of the game's.
 //!
 //! Lines are matched in English, the language scenes are aligned against. Cue
 //! names are the same in every language, so a script that passes them to
@@ -19,9 +22,14 @@ use std::sync::atomic::AtomicBool;
 
 use encoding_rs::WINDOWS_1252;
 use sc_mod_tool_core::{
-    GameCache, discover_banks_with_progress, discover_languages, subtitles::load_verified_subtitles,
+    GameCache, discover_banks_with_progress, discover_languages,
+    subtitles::load_verified_subtitles_with_override,
 };
 use serde_json::json;
+
+/// EnhancedSC's folder under `system`, whose files the game loads in place of
+/// its own.
+const OVERRIDE_FOLDER: &str = "Enhanced";
 
 fn main() -> ExitCode {
     let mut arguments = env::args_os().skip(1);
@@ -55,16 +63,21 @@ fn run(game_root: &Path, output: Option<&Path>) -> Result<(), String> {
         |_, _, _| {},
     )
     .map_err(|error| format!("Could not scan {}: {error}", language.label))?;
-    let analysis = load_verified_subtitles(
+    let analysis = load_verified_subtitles_with_override(
         game_root,
         &language.directory,
         &banks,
         &mut cache,
         &cancelled,
+        Some(OVERRIDE_FOLDER),
     )
     .map_err(|error| format!("Could not load {} subtitles: {error}", language.label))?;
 
-    let files = section_files(&game_root.join("system").join("LOCALIZATION"))?;
+    let system = game_root.join("system");
+    let files = section_files(&[
+        system.join(OVERRIDE_FOLDER).join("LOCALIZATION"),
+        system.join("LOCALIZATION"),
+    ])?;
     let lines = analysis
         .unshown_lines
         .iter()
@@ -115,23 +128,25 @@ fn run(game_root: &Path, output: Option<&Path>) -> Result<(), String> {
 }
 
 /// The English localization file each section is in, by lowercase section
-/// name, as the file name without its extension (`P_1_1_0Tbilisi`).
-fn section_files(localization_root: &Path) -> Result<HashMap<String, String>, String> {
-    let entries = fs::read_dir(localization_root).map_err(|error| {
-        format!(
-            "Could not read directory {}: {error}",
-            localization_root.display()
-        )
-    })?;
-    let mut paths = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("int"))
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
+/// name, as the file name without its extension (`P_1_1_0Tbilisi`). Earlier
+/// roots come first; a root that doesn't exist is skipped.
+fn section_files(localization_roots: &[PathBuf]) -> Result<HashMap<String, String>, String> {
+    let mut paths = Vec::new();
+    for localization_root in localization_roots {
+        let Ok(entries) = fs::read_dir(localization_root) else {
+            continue;
+        };
+        let mut root_paths = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("int"))
+            })
+            .collect::<Vec<_>>();
+        root_paths.sort();
+        paths.extend(root_paths);
+    }
     let mut files = HashMap::new();
     for path in paths {
         let bytes = fs::read(&path)
