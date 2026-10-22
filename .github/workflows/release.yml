@@ -60,10 +60,13 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      # Reuses the FFmpeg CI saves on main, without saving one per tag. CI
+      # doesn't build this Linux image or macOS x64, so those are built here.
       - name: FFmpeg
         uses: ./.github/actions/ffmpeg
         with:
           target: ${{ matrix.target }}
+          save: false
 
       - name: Package
         shell: bash

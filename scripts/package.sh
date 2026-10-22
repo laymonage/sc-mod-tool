@@ -74,6 +74,7 @@ if [ -z "$runtime" ]; then
 fi
 cp vendor/vgmstream/COPYING "$package/licenses/vgmstream.txt"
 cp "$ffmpeg_build/LICENSE.txt" "$package/licenses/ffmpeg.txt"
+cp "$ffmpeg_build/NOTICES.txt" "$package/licenses/ffmpeg-notices.txt"
 cp "$ffmpeg_build/SOURCE.txt" "$package/licenses/ffmpeg-source.txt"
 cp "$packages"/eliot.uelib/*/LICENSE "$package/licenses/UELib.txt"
 cp "$runtime/LICENSE.TXT" "$package/licenses/dotnet-runtime.txt"

@@ -7,6 +7,11 @@ inputs:
   target:
     description: The Rust target triple to build FFmpeg for.
     required: true
+  save:
+    description: >
+      Whether a new build is saved to the cache. It's saved as soon as it's
+      built, so a later step that fails doesn't lose it.
+    default: "true"
 
 runs:
   using: composite
@@ -18,7 +23,7 @@ runs:
       run: echo "name=${ImageOS:-$RUNNER_OS}" >> "$GITHUB_OUTPUT"
 
     - id: cache
-      uses: actions/cache@v6
+      uses: actions/cache/restore@v6
       with:
         path: build/ffmpeg/${{ inputs.target }}
         key: ffmpeg-${{ inputs.target }}-${{ steps.image.outputs.name }}-${{ hashFiles('scripts/ffmpeg.sh') }}
@@ -37,6 +42,12 @@ runs:
     - if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
       shell: bash
       run: bash scripts/ffmpeg.sh build ${{ inputs.target }}
+
+    - if: steps.cache.outputs.cache-hit != 'true' && inputs.save == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: build/ffmpeg/${{ inputs.target }}
+        key: ${{ steps.cache.outputs.cache-primary-key }}
 
     - shell: bash
       run: echo "$GITHUB_WORKSPACE/build/ffmpeg/${{ inputs.target }}" >> "$GITHUB_PATH"

@@ -66,8 +66,11 @@ into the app and the bridge, and of FFmpeg if you ship it:
   [third-party notices](https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT).
 - **FFmpeg**, which the app runs to read and stretch audio, ships beside it:
   LGPL 2.1 or later. It's built without changes and without external
-  libraries, and its source goes with each release, as the LGPL asks.
-  `scripts/package.sh` adds its license and how it was built.
+  libraries, and its source goes with each release, as the LGPL asks. A few
+  of its files are under other licenses, and on Windows the MinGW-w64 runtime
+  is built into it; `scripts/ffmpeg.sh` collects their notices from the
+  source as it builds, into `build/ffmpeg/<target>/NOTICES.txt`.
+  `scripts/package.sh` adds its license, those notices and how it was built.
 
 ## Game-data tests
 

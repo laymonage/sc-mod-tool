@@ -202,13 +202,9 @@ impl Ffmpeg {
         let output = stdout.map(join_reader).unwrap_or_default();
         let messages = stderr.map(join_reader).unwrap_or_default();
         if !status.success() {
-            let message = String::from_utf8_lossy(&messages);
-            let message = message
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("it gave no reason");
-            return Err(format!("FFmpeg couldn't {action}: {}", message.trim()).into());
+            let messages = String::from_utf8_lossy(&messages);
+            let reason = failure_reason(&messages).unwrap_or("it gave no reason");
+            return Err(format!("FFmpeg couldn't {action}: {reason}").into());
         }
         Ok(output)
     }
@@ -255,6 +251,24 @@ fn hide_console_window(command: &mut Command) {
 
 #[cfg(not(windows))]
 fn hide_console_window(_command: &mut Command) {}
+
+/// Why FFmpeg failed, from the errors it wrote. Its last lines only sum up,
+/// such as "Error opening output files: Invalid argument", so the last message
+/// from one of its parts, such as "[aist#0:0/adpcm_ima_qt @ 0x…] Decoding
+/// requested, but no decoder found for: adpcm_ima_qt", is used without its
+/// prefix, if there is one.
+fn failure_reason(messages: &str) -> Option<&str> {
+    let lines = messages
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let last = lines.clone().next_back()?;
+    let from_part = lines.rev().find_map(|line| {
+        let (prefix, message) = line.strip_prefix('[')?.split_once("] ")?;
+        prefix.contains(" @ ").then_some(message.trim())
+    });
+    Some(from_part.unwrap_or(last))
+}
 
 fn os_strings(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
@@ -577,6 +591,33 @@ mod tests {
                 "{tail:?}"
             );
         }
+    }
+
+    #[test]
+    fn failures_are_explained_by_ffmpegs_parts() {
+        let unsupported = "\
+[aist#0:0/adpcm_ima_qt @ 0x7995010180] Decoding requested, but no decoder found for: adpcm_ima_qt
+Error opening output file -.
+Error opening output files: Invalid argument
+";
+        assert_eq!(
+            failure_reason(unsupported),
+            Some("Decoding requested, but no decoder found for: adpcm_ima_qt")
+        );
+        let not_audio = "\
+[in#0 @ 0x7a26c14000] Error opening input: Invalid data found when processing input
+Error opening input file file:/tmp/t.xyz.
+Error opening input files: Invalid data found when processing input
+";
+        assert_eq!(
+            failure_reason(not_audio),
+            Some("Error opening input: Invalid data found when processing input")
+        );
+        assert_eq!(
+            failure_reason("file:/tmp/missing.wav: No such file or directory\n\n"),
+            Some("file:/tmp/missing.wav: No such file or directory")
+        );
+        assert_eq!(failure_reason(" \n"), None);
     }
 
     #[test]
