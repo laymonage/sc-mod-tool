@@ -78,8 +78,12 @@ pub(super) struct BridgeResult {
     error: Option<String>,
 }
 
+/// Runs UELib's analysis of the game's scripts. With `override_folder`, the
+/// packages in that folder under `system` replace the game's, as EnhancedSC's
+/// `Enhanced` folder does.
 pub(super) fn scan_compiled_links(
     game_root: &Path,
+    override_folder: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<BridgeResult, Error> {
     #[cfg(feature = "uelib-bridge")]
@@ -87,6 +91,7 @@ pub(super) fn scan_compiled_links(
         unsafe extern "C" {
             fn scmod_scan_script_audio_links(
                 game_root_utf8: *const std::ffi::c_char,
+                override_folder_utf8: *const std::ffi::c_char,
                 output_utf8: *mut u8,
                 output_capacity: i32,
             ) -> i32;
@@ -97,6 +102,10 @@ pub(super) fn scan_compiled_links(
             .ok_or_else(|| format!("Game path is not valid UTF-8: {}", game_root.display()))?;
         let game_root = CString::new(game_root)
             .map_err(|_| "Game path contains an unsupported null character.".to_owned())?;
+        let override_folder = override_folder
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| "Override folder contains an unsupported null character.".to_owned())?;
         // UELib's decompiler keeps its state in static fields, so concurrent
         // analyses would corrupt each other's output. Run one at a time.
         static BRIDGE_LOCK: Mutex<()> = Mutex::new(());
@@ -109,6 +118,9 @@ pub(super) fn scan_compiled_links(
         let status = unsafe {
             scmod_scan_script_audio_links(
                 game_root.as_ptr(),
+                override_folder
+                    .as_ref()
+                    .map_or(std::ptr::null(), |folder| folder.as_ptr()),
                 output.as_mut_ptr(),
                 i32::try_from(output.len()).expect("bridge output capacity fits i32"),
             )
@@ -140,7 +152,7 @@ pub(super) fn scan_compiled_links(
 
     #[cfg(not(feature = "uelib-bridge"))]
     {
-        let _ = (game_root, cancelled);
+        let _ = (game_root, override_folder, cancelled);
         Err("This build does not include the UELib bridge needed for subtitle matching.".into())
     }
 }
