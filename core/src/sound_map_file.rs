@@ -101,6 +101,12 @@ impl<'a> SoundMapFile<'a> {
         })
     }
 
+    /// The offsets of the area's resources.
+    pub(crate) fn resources(&self, area: &Area) -> impl Iterator<Item = usize> + use<> {
+        let area = *area;
+        (0..area.resource_count).map(move |index| area.resources_offset + index * RESOURCE_SIZE)
+    }
+
     /// The offset of the resource `reference` points at in `area`.
     fn resource(&self, area: &Area, reference: u32) -> Option<usize> {
         let index = (reference & 0x0FFF_FFFF) as usize;
@@ -112,6 +118,20 @@ impl<'a> SoundMapFile<'a> {
 pub(crate) fn read_u32(data: &[u8], position: usize) -> Option<u32> {
     let bytes = data.get(position..position.checked_add(4)?)?;
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
+}
+
+/// The file name of the audio resource at `position`, which is
+/// null-terminated and at most 32 bytes.
+pub(crate) fn file_name(data: &[u8], position: usize) -> Option<&[u8]> {
+    let start = position.checked_add(80)?;
+    let field = data.get(start..start.checked_add(32)?)?;
+    let name = &field[..field.iter().position(|byte| *byte == 0)?];
+    (!name.is_empty() && name.is_ascii()).then_some(name)
+}
+
+/// [`file_name`], as a string.
+pub(crate) fn read_file_name(data: &[u8], position: usize) -> Option<String> {
+    file_name(data, position).map(|name| String::from_utf8_lossy(name).into_owned())
 }
 
 #[cfg(test)]

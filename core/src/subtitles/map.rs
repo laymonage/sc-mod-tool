@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::sound_map_file::{AUDIO, SoundMapFile, read_u32};
+use crate::sound_map_file::{AUDIO, SoundMapFile, read_file_name, read_u32};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MapRecord {
@@ -88,15 +88,8 @@ fn read_audio_record(data: &[u8], position: usize) -> Option<MapRecord> {
         compressed_bytes,
         sample_count,
         sample_rate: read_u32(data, position + 68).unwrap_or(0),
-        bank: read_bank_name(data, position + 80),
+        bank: read_file_name(data, position),
     })
-}
-
-/// Reads a record's null-terminated bank file name, which is at most 32 bytes.
-fn read_bank_name(data: &[u8], position: usize) -> Option<String> {
-    let field = data.get(position..position.checked_add(32)?)?;
-    let name = &field[..field.iter().position(|byte| *byte == 0)?];
-    (!name.is_empty() && name.is_ascii()).then(|| String::from_utf8_lossy(name).into_owned())
 }
 
 /// Finds a sound's segment in every map that has it. Extra maps ship their own

@@ -31,6 +31,9 @@ pub(super) struct Replacement {
     pub(super) offset: u64,
     pub(super) stream: Arc<[u8]>,
     pub(super) sample_count: u32,
+    /// Whether it's another length than the stream it replaces, so saving it
+    /// moves the streams after it and changes the sound map.
+    pub(super) changes_length: bool,
     /// The stream decoded again, so what plays is what's saved.
     pub(super) preview: PlayableAudio,
 }
@@ -88,6 +91,15 @@ impl PendingEdits {
 
     pub(super) fn is_empty(&self) -> bool {
         self.banks.is_empty()
+    }
+
+    /// Whether any replacement is another length than the stream it
+    /// replaces.
+    pub(super) fn changes_lengths(&self) -> bool {
+        self.banks
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(|replacement| replacement.changes_length)
     }
 
     /// How many banks have replacements.
@@ -175,13 +187,15 @@ impl ReplacementDraft {
     /// already prepared for its options.
     pub(super) fn prepared(bank_path: &str, segment: Segment, sample_count: u32) -> Self {
         let offset = segment.stream_range().unwrap().0;
+        let mut prepared = super::test_support::replacement(offset, sample_count);
+        prepared.changes_length = sample_count != segment.sample_count;
         Self {
             bank_path: bank_path.to_owned(),
             segment,
             source: PathBuf::from("line.wav"),
             samples: Some(Arc::new(vec![0; sample_count as usize])),
             fit: FitOptions::default(),
-            prepared: Some(super::test_support::replacement(offset, sample_count)),
+            prepared: Some(prepared),
             error: None,
             job: None,
         }
@@ -208,6 +222,8 @@ pub(super) enum AfterPrepare {
 pub(super) struct SaveJob {
     pub(super) target: SaveTarget,
     pub(super) cancel: Arc<AtomicBool>,
+    /// How many banks it saves.
+    banks: usize,
     /// What to do once everything is saved, after asking about unsaved
     /// replacements.
     then: Option<GuardedAction>,
@@ -354,17 +370,6 @@ impl SCModToolApp {
             self.draft = Some(draft);
             return;
         };
-        if replacement.sample_count != draft.segment.sample_count {
-            self.draft = Some(ReplacementDraft {
-                error: Some(
-                    "Replacements of a different length can't be saved yet. Trim, pad or \
-                     stretch the audio to fit."
-                        .to_owned(),
-                ),
-                ..draft
-            });
-            return;
-        }
         self.forget_playback_of(&draft.segment.id);
         self.edits
             .insert(&draft.bank_path, &draft.segment.id, replacement);
@@ -496,9 +501,9 @@ impl SCModToolApp {
     }
 
     /// Writes the replacements over the game's files, asking first the first
-    /// time.
+    /// time, and again the first time it would change a sound map.
     pub(super) fn request_save_in_place(&mut self, ctx: &egui::Context) {
-        if self.save_confirmed {
+        if self.save_confirmed && (self.map_change_confirmed || !self.edits.changes_lengths()) {
             self.save_in_place(ctx);
         } else {
             self.confirming_save = true;
@@ -509,6 +514,7 @@ impl SCModToolApp {
         self.confirming_save = false;
         if confirmed {
             self.save_confirmed = true;
+            self.map_change_confirmed |= self.edits.changes_lengths();
             self.save_in_place(ctx);
         }
     }
@@ -565,6 +571,7 @@ impl SCModToolApp {
         self.save_job = Some(SaveJob {
             target: target.clone(),
             cancel: Arc::clone(&cancel),
+            banks: edits.len(),
             then,
         });
         self.set_status("Saving…", false);
@@ -604,7 +611,13 @@ impl SCModToolApp {
             }
         };
         let saved = report.saved.len();
-        let banks = if saved == 1 { "bank" } else { "banks" };
+        let banks = match report.maps.len() {
+            0 if saved == 1 => "bank".to_owned(),
+            0 => "banks".to_owned(),
+            1 if saved == 1 => "bank and its sound map".to_owned(),
+            1 => "banks and their sound map".to_owned(),
+            maps => format!("banks and {maps} sound maps"),
+        };
         match &job.target {
             SaveTarget::InPlace => {
                 self.edits.saved_in_place(&report.saved);
@@ -647,11 +660,13 @@ impl SCModToolApp {
             }
         }
         if let Some(failure) = report.failures.first() {
-            let failed = report.failures.len();
+            // A failure can stop several banks that have to match each other.
+            let failed = job.banks.saturating_sub(saved);
+            let failed_banks = if failed == 1 { "bank" } else { "banks" };
             let not_done = job.then.as_ref().map_or("", GuardedAction::description);
             self.set_status(
                 format!(
-                    "Saved {saved} {banks}, but {failed} could not be saved, such as: \
+                    "Saved {saved} {banks}, but {failed} {failed_banks} could not be saved: \
                      {failure} {not_done}"
                 )
                 .trim_end()
@@ -695,7 +710,11 @@ impl SCModToolApp {
             return;
         };
         match choice {
-            UnsavedChoice::Save => self.start_save(ctx, SaveTarget::InPlace, Some(action)),
+            UnsavedChoice::Save => {
+                // The question says when the sound maps change too.
+                self.map_change_confirmed |= self.edits.changes_lengths();
+                self.start_save(ctx, SaveTarget::InPlace, Some(action));
+            }
             UnsavedChoice::Discard => {
                 self.edits.clear();
                 self.perform(ctx, action);
@@ -771,6 +790,10 @@ fn prepare(
         &fit,
         cancel,
     )?;
+    if fitted.len() != segment.sample_count as usize {
+        // Checked now, as a save with it would fail.
+        edit::check_length_change(root, bank_path, offset, cancel).map_err(cant_change_length)?;
+    }
     let stream = edit::encode_replacement(root, bank_path, segment, &fitted, cancel)?;
     let sample_count = fitted.len() as u32;
     let preview = decoder::decode(&stream, sample_count, cancel)?;
@@ -780,8 +803,20 @@ fn prepare(
         offset,
         stream: stream.into(),
         sample_count,
+        changes_length: sample_count != segment.sample_count,
         preview: PlayableAudio::new(preview)?,
     })
+}
+
+/// Why a replacement can't be another length, with what to do instead.
+fn cant_change_length(error: Error) -> Error {
+    match error {
+        Error::Cancelled => Error::Cancelled,
+        Error::Failed(message) => format!(
+            "It can't keep its own length. {message} Trim, pad or stretch it to fit instead."
+        )
+        .into(),
+    }
 }
 
 #[cfg(test)]
@@ -945,19 +980,26 @@ mod tests {
     }
 
     #[test]
-    fn replacements_of_another_length_are_kept_out() {
+    fn replacements_of_another_length_are_noted() {
         let mut app = SCModToolApp::new(None);
         let ctx = egui::Context::default();
         let bank_path = "ENGLISH/1_1_0.LS0";
         app.draft = Some(ReplacementDraft::prepared(
             bank_path,
             stream_segment(bank_path, 0, 10),
+            10,
+        ));
+        app.apply_draft(&ctx);
+        assert!(!app.edits.changes_lengths());
+        app.draft = Some(ReplacementDraft::prepared(
+            bank_path,
+            stream_segment(bank_path, 200, 10),
             12,
         ));
         app.apply_draft(&ctx);
-        let draft = app.draft.as_ref().unwrap();
-        assert!(draft.error.as_deref().unwrap().contains("different length"));
-        assert!(app.edits.is_empty());
+        assert!(app.draft.is_none());
+        assert_eq!(app.edits.len(), 2);
+        assert!(app.edits.changes_lengths());
     }
 
     #[test]
@@ -1040,14 +1082,15 @@ mod tests {
         app.save_job = Some(SaveJob {
             target: SaveTarget::InPlace,
             cancel: Arc::default(),
+            banks: 2,
             then: None,
         });
         let cache = Arc::clone(&app.game_cache);
         let report = SaveReport {
             written: vec![PathBuf::from("game/Sounds/ENGLISH/1_1_0.LS0")],
             saved: vec!["ENGLISH/1_1_0.LS0".to_owned()],
-            backups: Vec::new(),
             failures: vec!["Could not write ENGLISH/1_1_1.LS0".to_owned()],
+            ..SaveReport::default()
         };
         app.finish_save(&ctx, Ok(report));
 
@@ -1056,6 +1099,11 @@ mod tests {
         assert_eq!(app.edits.bank_len("ENGLISH/1_1_1.LS0"), 1);
         assert!(app.edits.has_unsaved());
         assert!(app.status.is_error);
+        assert!(
+            app.status.message.contains("but 1 bank could not be saved"),
+            "{}",
+            app.status.message
+        );
         // The banks are read again, without what was read before.
         assert!(!Arc::ptr_eq(&cache, &app.game_cache));
         assert!(app.scan_cancel.is_some());
@@ -1073,6 +1121,7 @@ mod tests {
         app.save_job = Some(SaveJob {
             target: SaveTarget::Folder(PathBuf::from("mod")),
             cancel: Arc::default(),
+            banks: 2,
             then: Some(GuardedAction::Quit),
         });
         let report = SaveReport {
@@ -1098,6 +1147,7 @@ mod tests {
         app.save_job = Some(SaveJob {
             target: SaveTarget::InPlace,
             cancel: Arc::default(),
+            banks: 2,
             then: Some(GuardedAction::Quit),
         });
         let report = SaveReport {
@@ -1126,6 +1176,7 @@ mod tests {
         app.save_job = Some(SaveJob {
             target: SaveTarget::InPlace,
             cancel: Arc::default(),
+            banks: 2,
             then: Some(GuardedAction::Quit),
         });
         let report = SaveReport {
@@ -1141,6 +1192,55 @@ mod tests {
             app.status.message
         );
         assert!(app.scan_cancel.is_some());
+    }
+
+    #[test]
+    fn saving_asks_again_before_changing_a_map() {
+        let mut app = SCModToolApp::new(None);
+        let ctx = egui::Context::default();
+        app.save_confirmed = true;
+        let mut longer = replacement(0, 12);
+        longer.changes_length = true;
+        app.edits
+            .insert("ENGLISH/1_1_0.LS0", "ENGLISH/1_1_0.LS0:0", longer);
+        app.request_save_in_place(&ctx);
+        assert!(app.confirming_save);
+        assert!(app.save_job.is_none());
+
+        // Once confirmed, it isn't asked again.
+        app.confirm_save(&ctx, false);
+        assert!(!app.map_change_confirmed);
+        app.root = Some(PathBuf::from("game"));
+        app.confirm_save(&ctx, true);
+        assert!(app.map_change_confirmed);
+        app.save_job = None;
+        app.request_save_in_place(&ctx);
+        assert!(!app.confirming_save);
+    }
+
+    #[test]
+    fn saving_says_when_a_map_changed() {
+        let mut app = SCModToolApp::new(None);
+        let ctx = egui::Context::default();
+        app.save_job = Some(SaveJob {
+            target: SaveTarget::Folder(PathBuf::from("mod")),
+            cancel: Arc::default(),
+            banks: 2,
+            then: None,
+        });
+        let report = SaveReport {
+            saved: vec!["ENGLISH/1_1_0.LS0".to_owned()],
+            maps: vec!["ENGLISH/MAPS.LM0".to_owned()],
+            ..SaveReport::default()
+        };
+        app.finish_save(&ctx, Ok(report));
+        assert!(
+            app.status
+                .message
+                .starts_with("Saved 1 bank and its sound map to"),
+            "{}",
+            app.status.message
+        );
     }
 
     #[test]
@@ -1216,7 +1316,7 @@ mod tests {
         tone.write_wav(std::fs::File::create(&source).unwrap())
             .unwrap();
 
-        app.open_draft(&ctx, bank_path.clone(), segment.clone(), source);
+        app.open_draft(&ctx, bank_path.clone(), segment.clone(), source.clone());
         wait(&mut app, &|app| {
             app.draft.as_ref().is_some_and(|draft| !draft.is_busy())
         });
@@ -1258,6 +1358,42 @@ mod tests {
         assert_ne!(saved[range.clone()], original[range.clone()]);
         assert_eq!(saved[..range.start], original[..range.start]);
         assert_eq!(saved[range.end..], original[range.end..]);
+
+        // Keeping the tone's own two seconds changes the sound map too.
+        app.open_draft(&ctx, bank_path.clone(), segment.clone(), source);
+        wait(&mut app, &|app| {
+            app.draft.as_ref().is_some_and(|draft| !draft.is_busy())
+        });
+        app.set_draft_fit(FitOptions {
+            mode: sc_mod_tool_core::convert::FitMode::KeepLength,
+            ..FitOptions::default()
+        });
+        app.apply_draft(&ctx);
+        wait(&mut app, &|app| {
+            app.draft.is_none() || app.draft.as_ref().unwrap().error.is_some()
+        });
+        let replacement = app.replacement(&bank_path, &segment.id).unwrap();
+        assert_eq!(replacement.sample_count, 72000);
+        assert!(replacement.changes_length);
+        app.start_save(&ctx, SaveTarget::Folder(scratch.join("out")), None);
+        wait(&mut app, &|app| !app.is_saving());
+        assert!(!app.status.is_error, "{}", app.status.message);
+        assert!(
+            app.status.message.contains("its sound map"),
+            "{}",
+            app.status.message
+        );
+        let saved = std::fs::read(scratch.join("out/Sounds").join(&bank_path)).unwrap();
+        assert_ne!(saved.len(), original.len());
+        assert_eq!(saved[..range.start], original[..range.start]);
+        let folder = bank_path.rsplit_once('/').unwrap().0;
+        assert!(
+            scratch
+                .join("out/Sounds")
+                .join(folder)
+                .join("MAPS.LM0")
+                .exists()
+        );
         std::fs::remove_dir_all(&scratch).unwrap();
     }
 }

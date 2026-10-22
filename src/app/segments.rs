@@ -78,7 +78,10 @@ impl SCModToolApp {
         }
         let mut keyed = visible
             .into_iter()
-            .map(|index| (self.sort_key(&bank.segments[index], sort.column), index))
+            .map(|index| {
+                let segment = &bank.segments[index];
+                (self.sort_key(&bank.path, segment, sort.column), index)
+            })
             .collect::<Vec<_>>();
         // Missing values go last either way, and segments with equal values
         // stay in the bank's order.
@@ -98,9 +101,14 @@ impl SCModToolApp {
         keyed.into_iter().map(|(_, index)| index).collect()
     }
 
-    /// A segment's value in `column`, after a flag that's set when it has
-    /// none, such as a stream's key.
-    fn sort_key(&self, segment: &Segment, column: SortColumn) -> (bool, SortValue) {
+    /// A segment of the bank at `bank_path`'s value in `column`, after a flag
+    /// that's set when it has none, such as a stream's key.
+    fn sort_key(
+        &self,
+        bank_path: &str,
+        segment: &Segment,
+        column: SortColumn,
+    ) -> (bool, SortValue) {
         let number = |value: Option<u64>| (value.is_none(), SortValue::Number(value.unwrap_or(0)));
         let text = |value: Option<String>| {
             (
@@ -119,9 +127,15 @@ impl SCModToolApp {
         };
         match column {
             SortColumn::Number => number(Some(segment.segment as u64)),
-            SortColumn::Duration => number(Some(
-                u64::from(segment.sample_count) * 1_000_000 / u64::from(segment.sample_rate.max(1)),
-            )),
+            // As shown: a replacement's length, if it has one.
+            SortColumn::Duration => {
+                let sample_count = self
+                    .replacement(bank_path, &segment.id)
+                    .map_or(segment.sample_count, |replacement| replacement.sample_count);
+                number(Some(
+                    u64::from(sample_count) * 1_000_000 / u64::from(segment.sample_rate.max(1)),
+                ))
+            }
             SortColumn::Size => number(segment.stream_range().map(|(_, length)| length)),
             SortColumn::Offset => number(segment.stream_range().map(|(offset, _)| offset)),
             SortColumn::UsedIn => number(areas.map(|count| count as u64)),
@@ -209,6 +223,13 @@ mod tests {
 
         app.segment_sort = app.segment_sort.by(SortColumn::Duration);
         assert_eq!(app.visible_segments(), [1, 2, 0]);
+        // A replacement sorts by its own length.
+        app.edits.insert(
+            "ENGLISH/1_1_0.LS0",
+            "ENGLISH/1_1_0.LS0:1",
+            crate::app::test_support::replacement(0, 4000),
+        );
+        assert_eq!(app.visible_segments(), [2, 0, 1]);
 
         // `.LS0` banks have no Key column, such as after sorting a map's bank
         // by it and choosing another bank.

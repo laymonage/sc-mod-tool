@@ -65,6 +65,7 @@ pub(super) fn replacement(offset: u64, sample_count: u32) -> Replacement {
         offset,
         stream: Arc::from(vec![offset as u8; 4]),
         sample_count,
+        changes_length: false,
         preview: PlayableAudio::new(DecodedAudio {
             samples: vec![0; sample_count as usize],
             sample_rate: 36000,

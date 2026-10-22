@@ -284,6 +284,9 @@ pub struct SCModToolApp {
     confirming_save: bool,
     /// Whether they've confirmed it, which is only asked once.
     save_confirmed: bool,
+    /// Whether they've confirmed changing the sound maps too, which is asked
+    /// again the first time a save would.
+    map_change_confirmed: bool,
     /// The window's title, kept to change it only when it should.
     window_title: String,
 }
@@ -341,6 +344,7 @@ impl SCModToolApp {
             reselect: None,
             confirming_save: false,
             save_confirmed: false,
+            map_change_confirmed: false,
             window_title: String::new(),
         }
     }

@@ -12,7 +12,9 @@ use super::{
     Action, NO_TEXT, NO_TEXT_HINT, NOT_SHOWN_IN_GAME, NOT_SHOWN_IN_GAME_HINT, is_shown_in_game,
 };
 use crate::app::SCModToolApp;
-use crate::app::format::{format_bytes, format_channels, format_duration, format_key};
+use crate::app::format::{
+    format_bytes, format_channels, format_duration, format_key, format_length,
+};
 use crate::app::names::bank_title;
 
 impl SCModToolApp {
@@ -107,6 +109,16 @@ impl SCModToolApp {
                                         "Fit",
                                         fit_description(&replacement.fit, segment.sample_rate),
                                     );
+                                    if replacement.changes_length {
+                                        detail_row(
+                                            ui,
+                                            "Length",
+                                            format_length(
+                                                replacement.sample_count as usize,
+                                                segment.sample_rate,
+                                            ),
+                                        );
+                                    }
                                     let saved = if self.edits.has_unsaved() {
                                         "Not saved yet"
                                     } else {

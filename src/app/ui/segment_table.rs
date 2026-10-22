@@ -11,7 +11,7 @@ use sc_mod_tool_core::{SegmentSource, subtitles::Subtitle};
 use super::banks::mission_label;
 use super::widgets::name_icon_button;
 use super::{Action, NO_TEXT, NO_TEXT_HINT, NOT_SHOWN_IN_GAME, is_shown_in_game};
-use crate::app::format::{format_bytes, format_duration, format_key};
+use crate::app::format::{format_bytes, format_duration, format_key, format_length};
 use crate::app::segments::table_columns;
 use crate::app::{SCModToolApp, SortColumn, TextFilter};
 
@@ -200,6 +200,7 @@ impl SCModToolApp {
                 body.rows(row_height, visible.len(), |mut row| {
                     let index = visible[row.index()];
                     let segment = &bank.segments[index];
+                    let replacement = self.replacement(&bank.path, &segment.id);
                     let is_playing = playing == Some(segment.id.as_str());
                     row.set_selected(self.selected_segment == Some(index));
 
@@ -219,7 +220,7 @@ impl SCModToolApp {
                     });
                     row.col(|ui| {
                         ui.label(format!("{}", segment.segment + 1));
-                        if self.replacement(&bank.path, &segment.id).is_some() {
+                        if replacement.is_some() {
                             ui.label(
                                 RichText::new(ICON_FIBER_MANUAL_RECORD.codepoint)
                                     .small()
@@ -229,7 +230,18 @@ impl SCModToolApp {
                         }
                     });
                     row.col(|ui| {
-                        ui.label(format_duration(segment));
+                        match replacement.filter(|replacement| replacement.changes_length) {
+                            Some(replacement) => ui
+                                .label(format_length(
+                                    replacement.sample_count as usize,
+                                    segment.sample_rate,
+                                ))
+                                .on_hover_text(format!(
+                                    "The replacement's length. The original is {}.",
+                                    format_duration(segment)
+                                )),
+                            None => ui.label(format_duration(segment)),
+                        };
                     });
                     match segment.source {
                         SegmentSource::MapSound {

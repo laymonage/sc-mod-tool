@@ -143,6 +143,11 @@ impl SCModToolApp {
             GuardedAction::OpenRoot(_) => "opening another game folder",
             GuardedAction::Quit => "quitting",
         };
+        let maps = if self.edits.changes_lengths() {
+            " Replacements of another length change the sound maps beside them too."
+        } else {
+            ""
+        };
         let modal = egui::Modal::new(egui::Id::unique("unsaved")).show(ctx, |ui| {
             ui.set_width(400.0);
             ui.label(RichText::new("Save your replacements?").heading().strong());
@@ -150,8 +155,8 @@ impl SCModToolApp {
             ui.add(
                 egui::Label::new(format!(
                     "{count} replaced {segments} haven't been saved. Save them over the game's \
-                     files before {before}? The game's own files are kept beside them, ending in \
-                     .orig."
+                     files before {before}?{maps} The game's own files are kept beside them, \
+                     ending in .orig."
                 ))
                 .wrap(),
             );
@@ -183,6 +188,14 @@ impl SCModToolApp {
             1 => "1 bank".to_owned(),
             banks => format!("{banks} banks"),
         };
+        let (maps, file) = if self.edits.changes_lengths() {
+            (
+                ", and changes the sound map beside any of another length",
+                "file",
+            )
+        } else {
+            ("", "bank")
+        };
         let modal = egui::Modal::new(egui::Id::unique("confirm-save")).show(ctx, |ui| {
             ui.set_width(400.0);
             ui.label(
@@ -194,8 +207,8 @@ impl SCModToolApp {
             ui.add(
                 egui::Label::new(format!(
                     "This writes {count} replaced {segments} into {banks} in the game's Sounds \
-                     folder. Before a bank is first changed, the game's own file is copied \
-                     beside it, ending in .orig, so it can be put back."
+                     folder{maps}. Before a {file} is first changed, the game's own file is \
+                     copied beside it, ending in .orig, so it can be put back."
                 ))
                 .wrap(),
             );
@@ -284,14 +297,27 @@ fn fit_options(
                 .color(ui.visuals().warn_fg_color),
         );
     }
-    ui.add_enabled(
-        false,
-        egui::RadioButton::new(fit.mode == FitMode::KeepLength, "Keep its own length"),
+    ui.radio_value(
+        &mut fit.mode,
+        FitMode::KeepLength,
+        "Keep its own length (experimental)",
     )
-    .on_disabled_hover_text(
-        "Not available yet: a segment of another length needs the sound map, MAPS.LM0, \
-         changed too.",
+    .on_hover_text(
+        "The segments after it in the bank move, and the sound map, MAPS.LM0, is changed to \
+         match.",
     );
+    if fit.mode == FitMode::KeepLength && selected != target {
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Saving changes the sound map, MAPS.LM0, too. Its subtitle shows for the new \
+                     length, but lip-sync stays timed to the old one.",
+                )
+                .color(ui.visuals().warn_fg_color),
+            )
+            .wrap(),
+        );
+    }
     fit
 }
 
@@ -376,6 +402,20 @@ mod tests {
             .click();
         harness.run();
         assert!(harness.state().edits.is_empty());
+    }
+
+    #[test]
+    fn a_replacement_can_keep_its_own_length() {
+        let mut harness = harness();
+        harness.run();
+        harness
+            .get_by_role_and_label(Role::RadioButton, "Keep its own length (experimental)")
+            .click();
+        harness.run();
+        let draft = harness.state().draft.as_ref().unwrap();
+        assert_eq!(draft.fit.mode, FitMode::KeepLength);
+        // The file is as long as the segment, so nothing else changes.
+        harness.get_by_role_and_label(Role::Button, "Replace");
     }
 
     #[test]

@@ -17,6 +17,13 @@ segment's `byte_length` is the stream itself, without that padding, because the
 maps record the unpadded size. Scanned in
 [`ls0.rs`](../core/src/banks/ls0.rs).
 
+Nothing else is in a bank: the first stream starts at 0, and between streams,
+and after the last, there are only the 0 to 3 bytes of padding. They're
+leftover bytes, not always zero. Every stream is in the language's
+`MAPS.LM0`, and no `MAPS.SM0` points into a numbered bank. Saving a
+replacement of another length relies on this layout, and refuses a bank that
+doesn't follow it ([`edit.rs`](../core/src/edit.rs)).
+
 A level's lines are usually stored together, in roughly the order they're
 spoken, which is a useful clue when checking a match by hand.
 
