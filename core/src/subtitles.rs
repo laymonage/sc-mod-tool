@@ -51,6 +51,26 @@ impl Subtitle {
     }
 }
 
+/// A script call that plays a line without a subtitle, matched to its line in
+/// the localization section named after its pattern.
+#[derive(Clone, Debug)]
+pub struct UnshownLine {
+    pub pattern: String,
+    /// The compiled state or function the call is in.
+    pub source_object: String,
+    /// `Package.Event`, as the script names the sound.
+    pub sound_event: String,
+    /// The native function the sound is passed to, such as `__NFUN_1408__`.
+    pub function: Option<String>,
+    /// How many earlier dialogue calls in the same source object play the
+    /// same sound.
+    pub occurrence: usize,
+    pub cue: String,
+    pub text: Option<String>,
+    /// The segments the sound plays, empty when it couldn't be resolved.
+    pub segments: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SubtitleAnalysis {
     pub by_segment: HashMap<String, Vec<Subtitle>>,
@@ -59,6 +79,8 @@ pub struct SubtitleAnalysis {
     pub mapped_pairs: usize,
     /// Sounds matched to text the game doesn't show, by section order.
     pub unshown_pairs: usize,
+    /// Every call matched to text the game doesn't show, in script order.
+    pub unshown_lines: Vec<UnshownLine>,
 }
 
 impl SubtitleAnalysis {

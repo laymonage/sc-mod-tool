@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use super::bridge::{BridgeCall, BridgePattern};
 use super::localization::line_text;
 use super::map::{SoundMap, clip_seconds, resolve_segments};
-use super::{MappingConfidence, Subtitle, SubtitleAnalysis, add_subtitle, push_warning};
+use super::{
+    MappingConfidence, Subtitle, SubtitleAnalysis, UnshownLine, add_subtitle, push_warning,
+};
 
 /// Matches the sounds a pattern plays without a subtitle to the lines of the
 /// localization section named after the pattern, by position.
@@ -52,23 +54,42 @@ pub(super) fn match_unshown_subtitles(
         },
     };
 
+    let mut occurrences = HashMap::<(&str, &str), usize>::new();
     for (call, line) in calls.iter().zip(matched) {
+        let occurrence = occurrences
+            .entry((&call.source_object, &call.sound_event))
+            .or_default();
+        *occurrence += 1;
         let Some((cue, text)) = line else {
             continue;
         };
         if call.cue.is_some() {
             continue;
         }
+        let mut unshown = UnshownLine {
+            pattern: pattern.pattern.clone(),
+            source_object: call.source_object.clone(),
+            sound_event: call.sound_event.clone(),
+            function: call.function.clone(),
+            occurrence: *occurrence - 1,
+            cue: cue.clone(),
+            text: line_text(text),
+            segments: Vec::new(),
+        };
         let Some(key) = call.sound_map_key else {
+            analysis.unshown_lines.push(unshown);
             continue;
         };
         let segments = match resolve_segments(&call.sound_event, key, maps) {
             Ok(segments) => segments,
             Err(warning) => {
                 push_warning(&mut analysis.warnings, warning);
+                analysis.unshown_lines.push(unshown);
                 continue;
             }
         };
+        unshown.segments = segments.iter().map(|segment| segment.id.clone()).collect();
+        analysis.unshown_lines.push(unshown);
         for segment in segments {
             add_subtitle(
                 analysis,
@@ -553,6 +574,67 @@ mod tests {
         );
         // The sound passed with its cue is matched explicitly elsewhere.
         assert!(!analysis.by_segment.contains_key("ENGLISH/1_1_2.LS0:100"));
+        let lines = analysis
+            .unshown_lines
+            .iter()
+            .map(|line| {
+                (
+                    line.sound_event.as_str(),
+                    line.cue.as_str(),
+                    line.segments.as_slice(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines,
+            [
+                (
+                    "S1_1_2Voice.Play_A",
+                    "Speech_0009L",
+                    &["ENGLISH/1_1_2.LS0:0".to_owned()][..]
+                ),
+                (
+                    "S1_1_2Voice.Play_C",
+                    "Speech_0001L",
+                    &["ENGLISH/1_1_2.LS0:200".to_owned()][..]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn counts_repeated_sounds_in_a_source_object() {
+        let banks = test_bank(&[0]);
+        let records = test_records(&[(1, 0)]);
+        let pattern = BridgePattern {
+            pattern: "P_Talk".to_owned(),
+            source_package: "EchelonPattern.u".to_owned(),
+            calls: vec![
+                test_call("S1_1_2Voice.Play_A", 1, None),
+                test_call("S1_1_2Voice.Play_A", 1, None),
+            ],
+        };
+        let mut sections = HashMap::new();
+        parse_sections(
+            "[P_Talk]\nSpeech_0001L=First.\nSpeech_0002L=Again.\n",
+            &mut sections,
+        );
+        let mut analysis = SubtitleAnalysis::default();
+
+        match_unshown_subtitles(
+            &mut analysis,
+            &pattern,
+            &sections,
+            &sections,
+            &test_maps(records, &banks),
+        );
+
+        let occurrences = analysis
+            .unshown_lines
+            .iter()
+            .map(|line| (line.cue.as_str(), line.occurrence))
+            .collect::<Vec<_>>();
+        assert_eq!(occurrences, [("Speech_0001L", 0), ("Speech_0002L", 1)]);
     }
 
     #[test]
