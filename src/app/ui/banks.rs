@@ -50,7 +50,7 @@ impl SCModToolApp {
                                     ui.label(RichText::new(group).small().weak());
                                     shown_group = Some(group);
                                 }
-                                let replaced = self.edits.bank_len(&bank.path);
+                                let replaced = self.edits.bank_len(&bank.path, bank.sound_kind);
                                 if bank_row(ui, bank, self.selected_bank == Some(index), replaced)
                                     .clicked()
                                 {

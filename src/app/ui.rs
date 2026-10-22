@@ -19,6 +19,7 @@ const NO_TEXT_HINT: &str =
 
 use super::edits::UnsavedChoice;
 use super::{SCModToolApp, SortColumn};
+use sc_mod_tool_core::SoundKind;
 use sc_mod_tool_core::convert::FitOptions;
 
 /// Something the user asked for while the UI was drawn, applied afterwards.
@@ -51,7 +52,7 @@ enum Action {
     /// Remove a replacement, by bank path and segment ID.
     Revert(String, String),
     /// Remove all of a bank's replacements, by its path.
-    RevertBank(String),
+    RevertBank(String, Option<SoundKind>),
     SetDraftFit(FitOptions),
     PreviewDraft,
     ApplyDraft,
@@ -138,7 +139,7 @@ impl SCModToolApp {
                 self.play_original(ctx, &bank_path, &segment_id);
             }
             Action::Revert(bank_path, segment_id) => self.revert_segment(&bank_path, &segment_id),
-            Action::RevertBank(bank_path) => self.revert_bank(&bank_path),
+            Action::RevertBank(bank_path, kind) => self.revert_bank(&bank_path, kind),
             Action::SetDraftFit(fit) => self.set_draft_fit(fit),
             Action::PreviewDraft => self.preview_draft(ctx),
             Action::ApplyDraft => self.apply_draft(ctx),

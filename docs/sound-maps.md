@@ -29,6 +29,7 @@ All values are little-endian 32-bit unless noted:
 | | `+16` | Area name, such as `1_1_0Tbilisi` |
 | Area header | `+4`, `+8` | Offset (from the header) and number of events |
 | | `+12`, `+16` | Offset (from the header) and number of resources |
+| | `+20`, `+24` | Offset (from the header) and number of entries of [section 3](#audio-stored-in-a-map) |
 | | `+28`, `+32` | Offset (from the header) and size of the extra section |
 | Event (`0x58` bytes) | `+0` | Key: `(package ID << 16) \| sound ID` |
 | | `+4` | Type: `1` plays, `2` stops |
@@ -41,8 +42,10 @@ An audio resource (type `1`) continues:
 
 | Offset | Field |
 |---|---|
+| `+8` | `1`, in every audio resource in the game's maps. vgmstream reads `0` as audio in another file |
 | `+12` | Stream size in bytes, repeated at `+52` |
-| `+20` | Offset of the stream in its file |
+| `+20` | Offset of the stream in its file, `0` for audio stored in the map |
+| `+40` | Bit 0 set if it's streamed from another file, clear if it's stored in the map |
 | `+48` | Sample count |
 | `+68` | Sample rate |
 | `+72`, `+74` | Bits per decoded sample (16) and channels, 16-bit each |
@@ -60,6 +63,31 @@ file name.
 The app reads events and resources in
 [`sound_map_file.rs`](../core/src/sound_map_file.rs), for subtitles. vgmstream
 reads the rest.
+
+## Audio stored in a map
+
+Audio stored in the map isn't found from its resource's offset, which is `0`.
+Each area keeps its own copy of the audio its resources play, in subblocks
+after its tables, and "section 3" says where. Each of its entries (`0x14`
+bytes) is:
+
+| Offset | Field |
+|---|---|
+| `+0` | An ID, `-1` for the first |
+| `+4`, `+8` | Offset (from section 3) and number of entries of the audio table |
+| `+12`, `+16` | Offset (from section 3) and number of entries of the subblock table |
+
+The audio table's entries (8 bytes) are a resource's index in the area, in its
+low 30 bits, and where its audio starts in its subblock. The subblock table's
+(16 bytes) are a subblock's ID, its size with and without padding, and its
+offset in the map file. 16-bit PCM is in subblock `0`, and other codecs in
+subblock `1`, as vgmstream reads them.
+
+Every area that plays a sound has a copy, and in the game's maps the copies
+are identical: `MAPS.SM0`'s 868 PCM sounds have 6,058 copies, for example. The
+app replaces a sound by writing every copy
+([editing notes](editing-notes.md#how-saving-works)). It reads the tables in
+[`sound_map_file.rs`](../core/src/sound_map_file.rs).
 
 ## Resource types
 
@@ -132,10 +160,17 @@ in `1_3_2.LS0`. Guessing the bank from the package name gets that wrong.
 ## `MAPS.SM0`'s events
 
 `MAPS.SM0`'s resources have the same layout, but most of its events don't use
-`0x40000000` references, so they point at their sounds some other way that
-hasn't been worked out. Its sounds are listed through vgmstream all the same,
-but whether the game pitches any of them isn't known; they're played at their
-stored rates.
+`0x40000000` references. Their references have no top bits at all, and read
+as a plain resource index, every one is in range, so that's likely what they
+are. vgmstream only follows tagged references, so it plays `MAPS.SM0`'s sounds
+at their stored rates.
+
+Read that way, a few of its events set a pitch other than 1.0: `ALALAS_1.wav`,
+an alarm, is played at ×1.19 in the Defense Ministry, CIA, Kalinatek and the
+Presidential Palace, and `UZIIIS_1.wav` at ×0.94 at Kalinatek, with others
+through containers. Whether the game applies those pitches hasn't been tested.
+If it does, a replacement of one of those sounds plays faster or slower in the
+game than the app's preview.
 
 ## How the app lists them
 

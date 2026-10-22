@@ -82,8 +82,9 @@ impl SCModToolApp {
                             {
                                 actions.push(Action::Export(row));
                             }
-                            // Only Ubisoft ADPCM streams in .LS0 files can be
-                            // replaced so far.
+                            // Only Ubisoft ADPCM streams in .LS0 files, and
+                            // mono 16-bit PCM stored in maps, can be replaced
+                            // so far.
                             if segment.replaceable_stream(&bank.path).is_some()
                                 && action_button(ui, ICON_AUDIO_FILE.codepoint, "Replace…")
                                     .on_hover_text("Choose an audio file to play instead.")

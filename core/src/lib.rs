@@ -103,18 +103,43 @@ pub enum SegmentSource {
         areas: Vec<Area>,
         /// The sound's stream, if it's one that can be replaced: a Ubisoft
         /// ADPCM stream in an `.LS0` file, such as Lambert's alarm warnings
-        /// in `Music_Common.LS0`.
+        /// in `Music_Common.LS0`, or mono 16-bit PCM stored in the map.
         stream: Option<FileStream>,
     },
 }
 
-/// A stream in a file other than the sound map that plays it.
+/// Where a map's sound's audio is, to replace it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileStream {
-    /// The file, relative to `Sounds`, such as `ENGLISH/Music_Common.LS0`.
+    /// The file, relative to `Sounds`, such as `ENGLISH/Music_Common.LS0`, or
+    /// the map itself.
     pub path: String,
-    pub offset: u64,
+    /// Where the audio starts: once in an `.LS0` file, and once for each of
+    /// the map's areas that plays a clip stored in it, as each area keeps a
+    /// copy of its own.
+    pub offsets: Vec<u64>,
     pub byte_length: u64,
+    pub format: StreamFormat,
+}
+
+/// How a stream that can be replaced is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamFormat {
+    /// Ubisoft ADPCM in an `.LS0` file, which can change length.
+    UbisoftAdpcm,
+    /// Mono 16-bit PCM stored in a sound map, which has to keep its length.
+    Pcm16,
+}
+
+/// A segment's stream that can be replaced, from [`Segment::replaceable_stream`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplaceableStream<'a> {
+    /// The file holding it, relative to `Sounds`.
+    pub path: &'a str,
+    /// Where each copy of it starts.
+    pub offsets: &'a [u64],
+    pub byte_length: u64,
+    pub format: StreamFormat,
 }
 
 /// One of a sound map's areas, such as `1_1_0Tbilisi`: one for each level,
@@ -141,18 +166,27 @@ impl Segment {
         }
     }
 
-    /// The `.LS0` file holding the segment's stream, relative to `Sounds`,
-    /// and the stream's offset and length in it, if it can be replaced.
-    /// `bank_path` is the path of the segment's bank.
-    pub fn replaceable_stream<'a>(&'a self, bank_path: &'a str) -> Option<(&'a str, u64, u64)> {
+    /// Where the segment's stream is, if it can be replaced. `bank_path` is
+    /// the path of the segment's bank.
+    pub fn replaceable_stream<'a>(&'a self, bank_path: &'a str) -> Option<ReplaceableStream<'a>> {
         match &self.source {
             SegmentSource::Stream {
                 offset,
                 byte_length,
-            } => Some((bank_path, *offset, *byte_length)),
-            SegmentSource::MapSound { stream, .. } => stream
-                .as_ref()
-                .map(|stream| (stream.path.as_str(), stream.offset, stream.byte_length)),
+            } => Some(ReplaceableStream {
+                path: bank_path,
+                offsets: std::slice::from_ref(offset),
+                byte_length: *byte_length,
+                format: StreamFormat::UbisoftAdpcm,
+            }),
+            SegmentSource::MapSound { stream, .. } => {
+                stream.as_ref().map(|stream| ReplaceableStream {
+                    path: &stream.path,
+                    offsets: &stream.offsets,
+                    byte_length: stream.byte_length,
+                    format: stream.format,
+                })
+            }
         }
     }
 }

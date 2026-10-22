@@ -23,8 +23,12 @@ pub(crate) const OFFSET: usize = 20;
 pub(crate) const SAMPLE_COUNT: usize = 48;
 /// The size again.
 pub(crate) const SIZE_AGAIN: usize = 52;
+/// The field of an audio resource with its sample rate.
+pub(crate) const RATE: usize = 68;
 /// The field of an audio resource with its codec.
 pub(crate) const CODEC: usize = 76;
+/// The codec of 16-bit PCM, which most sounds stored in maps use.
+pub(crate) const PCM: u32 = 1;
 /// The codec of Ubisoft ADPCM, which dialogue and Lambert's lines use.
 pub(crate) const UBISOFT_ADPCM: u32 = 2;
 
@@ -37,6 +41,7 @@ pub(crate) struct SoundMapFile<'a> {
 /// Where an area's lists are in its map.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Area {
+    header: usize,
     events_offset: usize,
     event_count: usize,
     resources_offset: usize,
@@ -76,6 +81,7 @@ impl<'a> SoundMapFile<'a> {
                     .ok_or_else(unreadable)
             };
             let area = Area {
+                header,
                 events_offset: relative(4)?,
                 event_count: read(header + 8)?,
                 resources_offset: relative(0xc)?,
@@ -118,6 +124,104 @@ impl<'a> SoundMapFile<'a> {
         (0..area.resource_count).map(move |index| area.resources_offset + index * RESOURCE_SIZE)
     }
 
+    /// The 16-bit PCM clips stored in `area`, which areas each keep their own
+    /// copy of. A resource that says its audio is in the map but whose audio
+    /// can't be found is left out.
+    ///
+    /// The area's "section 3", at its header's `+0x14`, has one or more tables
+    /// of where each resource's audio is in a subblock of the map, by the
+    /// resource's index, and of where each subblock is. PCM is in subblock 0,
+    /// as vgmstream reads it.
+    pub(crate) fn stored_clips(&self, area: &Area) -> Vec<StoredClip<'a>> {
+        let data = self.data;
+        let read = |position: usize| read_u32(data, position).map(|value| value as usize);
+        // Whether `count` entries of `size` bytes from `offset` are in the map,
+        // so that a damaged count can't make this loop for long.
+        let fits = |offset: usize, count: usize, size: usize| {
+            count
+                .checked_mul(size)
+                .and_then(|length| length.checked_add(offset))
+                .is_some_and(|end| end <= data.len())
+        };
+        let mut places = std::collections::HashMap::new();
+        let (Some(section), Some(entries)) = (
+            read(area.header + 0x14).and_then(|offset| offset.checked_add(area.header)),
+            read(area.header + 0x18),
+        ) else {
+            return Vec::new();
+        };
+        if !fits(section, entries, 0x14) {
+            return Vec::new();
+        }
+        for entry in 0..entries {
+            let entry = section + entry * 0x14;
+            let (Some(audio), Some(audio_count), Some(blocks), Some(block_count)) = (
+                read(entry + 4).map(|offset| section + offset),
+                read(entry + 8),
+                read(entry + 0xc).map(|offset| section + offset),
+                read(entry + 0x10),
+            ) else {
+                break;
+            };
+            if !fits(audio, audio_count, 8) || !fits(blocks, block_count, 0x10) {
+                continue;
+            }
+            let block = (0..block_count)
+                .map(|index| blocks + index * 0x10)
+                .find(|&block| read(block) == Some(0));
+            let Some((Some(size), Some(start))) =
+                block.map(|block| (read(block + 8), read(block + 0xc)))
+            else {
+                continue;
+            };
+            for index in 0..audio_count {
+                let position = audio + index * 8;
+                if let (Some(resource), Some(offset)) = (read(position), read(position + 4)) {
+                    places.insert(resource & 0x3FFF_FFFF, (start, offset, size));
+                }
+            }
+        }
+
+        let mut clips = Vec::new();
+        for (index, resource) in self.resources(area).enumerate() {
+            let Some(audio) = audio_resource(data, resource) else {
+                continue;
+            };
+            let read16 = |field: usize| {
+                let bytes = data.get(resource + field..resource + field + 2)?;
+                Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+            };
+            let stored = read(resource + 8).is_some_and(|internal| internal != 0)
+                && read(resource + 0x28).is_some_and(|streamed| streamed & 1 == 0);
+            let (Some(placement), Some(&(start, offset, size))) =
+                (audio.placement, places.get(&index))
+            else {
+                continue;
+            };
+            let length = placement.length as usize;
+            if !stored
+                || audio.codec != Some(PCM)
+                || read16(72) != Some(16)
+                || offset.checked_add(length).is_none_or(|end| end > size)
+                || start
+                    .checked_add(offset + length)
+                    .is_none_or(|end| end > data.len())
+            {
+                continue;
+            }
+            clips.push(StoredClip {
+                resource,
+                key: audio.key,
+                name: audio.file_name,
+                offset: (start + offset) as u64,
+                length: placement.length,
+                sample_count: placement.sample_count,
+                channels: read16(74).unwrap_or(0),
+            });
+        }
+        clips
+    }
+
     /// The offset of the resource `reference` points at in `area`.
     fn resource(&self, area: &Area, reference: u32) -> Option<usize> {
         let index = (reference & 0x0FFF_FFFF) as usize;
@@ -135,10 +239,27 @@ pub(crate) struct Placement {
     pub(crate) sample_count: u32,
 }
 
+/// A clip of 16-bit PCM stored in a map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StoredClip<'a> {
+    /// Where its resource is in the map.
+    pub(crate) resource: usize,
+    /// Its resource's key and file name, the name of the original recording.
+    pub(crate) key: u32,
+    pub(crate) name: &'a [u8],
+    /// Where its audio is in the map file.
+    pub(crate) offset: u64,
+    pub(crate) length: u64,
+    pub(crate) sample_count: u32,
+    pub(crate) channels: u16,
+}
+
 /// What an audio resource says about its audio.
 pub(crate) struct AudioResource<'a> {
     pub(crate) key: u32,
     pub(crate) codec: Option<u32>,
+    /// The rate it's stored at.
+    pub(crate) rate: Option<u32>,
     pub(crate) file_name: &'a [u8],
     /// Where its stream is, unless the resource's two sizes disagree.
     pub(crate) placement: Option<Placement>,
@@ -155,6 +276,7 @@ pub(crate) fn audio_resource(data: &[u8], position: usize) -> Option<AudioResour
     Some(AudioResource {
         key: read(0)?,
         codec: read(CODEC),
+        rate: read(RATE),
         file_name: file_name(data, position)?,
         placement: (read(SIZE_AGAIN)? == length).then_some(Placement {
             offset: offset.into(),
@@ -228,6 +350,127 @@ pub(crate) mod tests {
             data[resource + 80..resource + 89].copy_from_slice(b"0_0_2.LS0");
         }
         data
+    }
+
+    /// A map whose areas each store the given mono 16-bit PCM clips, by key
+    /// and name, with the clips' audio after each area's tables. The first
+    /// area also has audio resources for `streams`, in other files.
+    pub(crate) fn map_with_clips(
+        areas: &[&[(u32, &str, &[i16])]],
+        streams: &[(&str, Placement)],
+    ) -> Vec<u8> {
+        let mut data = vec![0; 0x0c + areas.len() * AREA_SIZE];
+        for (position, value) in [(0, 7), (4, 0x0c), (8, areas.len() as u32)] {
+            write_u32(&mut data, position, value);
+        }
+        for (index, clips) in areas.iter().enumerate() {
+            let header = data.len();
+            write_u32(&mut data, 0x0c + index * AREA_SIZE + 8, header as u32);
+            let streams = if index == 0 { streams } else { &[] };
+            let resources = 0x24;
+            let section = resources + (clips.len() + streams.len()) * RESOURCE_SIZE;
+            let blocks = 0x14 + clips.len() * 8;
+            let audio = section + blocks + 0x10;
+            data.resize(header + audio, 0);
+            for (field, value) in [
+                (4, resources),
+                (0xc, resources),
+                (0x10, clips.len() + streams.len()),
+                (0x14, section),
+                (0x18, 1),
+            ] {
+                write_u32(&mut data, header + field, value as u32);
+            }
+            let section = header + section;
+            for (field, value) in [(0, u32::MAX), (4, 0x14), (8, clips.len() as u32)] {
+                write_u32(&mut data, section + field, value);
+            }
+            write_u32(&mut data, section + 0xc, blocks as u32);
+            write_u32(&mut data, section + 0x10, 1);
+            let mut offset = 0;
+            for (clip, &(key, name, samples)) in clips.iter().enumerate() {
+                let resource = header + resources + clip * RESOURCE_SIZE;
+                let length = samples.len() as u32 * 2;
+                for (field, value) in [
+                    (0, key),
+                    (4, AUDIO),
+                    (8, 1),
+                    (SIZE, length),
+                    (SAMPLE_COUNT, samples.len() as u32),
+                    (SIZE_AGAIN, length),
+                    (68, 22_050),
+                    (72, 0x0001_0010),
+                    (CODEC, PCM),
+                ] {
+                    write_u32(&mut data, resource + field, value);
+                }
+                data[resource + 80..resource + 80 + name.len()].copy_from_slice(name.as_bytes());
+                write_u32(&mut data, section + 0x14 + clip * 8, clip as u32);
+                write_u32(&mut data, section + 0x14 + clip * 8 + 4, offset);
+                offset += length;
+            }
+            for (stream, (name, placement)) in streams.iter().enumerate() {
+                let resource = header + resources + (clips.len() + stream) * RESOURCE_SIZE;
+                for (field, value) in [
+                    (0, 100 + stream as u32),
+                    (4, AUDIO),
+                    (SIZE, placement.length as u32),
+                    (OFFSET, placement.offset as u32),
+                    (SAMPLE_COUNT, placement.sample_count),
+                    (SIZE_AGAIN, placement.length as u32),
+                    (CODEC, UBISOFT_ADPCM),
+                ] {
+                    write_u32(&mut data, resource + field, value);
+                }
+                data[resource + 80..resource + 80 + name.len()].copy_from_slice(name.as_bytes());
+            }
+            let block = section + blocks;
+            for (field, value) in [
+                (0, 0),
+                (4, offset),
+                (8, offset),
+                (0xc, (header + audio) as u32),
+            ] {
+                write_u32(&mut data, block + field, value);
+            }
+            for &(_, _, samples) in *clips {
+                data.extend(samples.iter().flat_map(|sample| sample.to_le_bytes()));
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn finds_clips_stored_in_areas() {
+        let map = map_with_clips(
+            &[
+                &[(1, "DOOR.wav", &[1, 2, 3]), (2, "STEP.wav", &[4, 5])],
+                &[(2, "STEP.wav", &[4, 5])],
+            ],
+            &[],
+        );
+        let file = SoundMapFile::parse(&map).unwrap();
+        let clips: Vec<_> = file
+            .areas()
+            .iter()
+            .flat_map(|area| file.stored_clips(area))
+            .map(|clip| {
+                let start = clip.offset as usize;
+                (
+                    clip.key,
+                    clip.name,
+                    map[start..start + clip.length as usize].to_vec(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            clips,
+            [
+                (1, &b"DOOR.wav"[..], vec![1, 0, 2, 0, 3, 0]),
+                (2, &b"STEP.wav"[..], vec![4, 0, 5, 0]),
+                (2, &b"STEP.wav"[..], vec![4, 0, 5, 0]),
+            ]
+        );
     }
 
     pub(crate) fn write_u32(data: &mut [u8], position: usize, value: u32) {

@@ -5,6 +5,7 @@ use std::path::Path;
 
 use eframe::egui::{self, Align, Layout, RichText};
 use egui_material_icons::icons::{ICON_HISTORY, ICON_PLAY_ARROW, ICON_STOP};
+use sc_mod_tool_core::StreamFormat;
 use sc_mod_tool_core::convert::{FitMode, FitOptions, stretch_factor};
 
 use super::Action;
@@ -63,7 +64,17 @@ impl SCModToolApp {
             if let Some(samples) = &draft.samples {
                 ui.add_space(8.0);
                 ui.separator();
-                let fit = fit_options(ui, &draft.fit, samples.len(), target, rate);
+                let can_change_length = segment
+                    .replaceable_stream(&draft.bank_path)
+                    .is_some_and(|stream| stream.format == StreamFormat::UbisoftAdpcm);
+                let fit = fit_options(
+                    ui,
+                    &draft.fit,
+                    samples.len(),
+                    target,
+                    rate,
+                    can_change_length,
+                );
                 if fit != draft.fit {
                     actions.push(Action::SetDraftFit(fit));
                 }
@@ -184,17 +195,14 @@ impl SCModToolApp {
         }
         let count = self.edits.len();
         let segments = if count == 1 { "segment" } else { "segments" };
-        let banks = match self.edits.file_count() {
-            1 => "1 bank".to_owned(),
-            banks => format!("{banks} banks"),
+        let files = match self.edits.file_count() {
+            1 => "1 file".to_owned(),
+            files => format!("{files} files"),
         };
-        let (maps, file) = if self.edits.changes_lengths() {
-            (
-                ", and changes the sound map beside any of another length",
-                "file",
-            )
+        let maps = if self.edits.changes_lengths() {
+            ", and changes the sound map beside any of another length"
         } else {
-            ("", "bank")
+            ""
         };
         let modal = egui::Modal::new(egui::Id::unique("confirm-save")).show(ctx, |ui| {
             ui.set_width(400.0);
@@ -206,8 +214,8 @@ impl SCModToolApp {
             ui.add_space(6.0);
             ui.add(
                 egui::Label::new(format!(
-                    "This writes {count} replaced {segments} into {banks} in the game's Sounds \
-                     folder{maps}. Before a {file} is first changed, the game's own file is \
+                    "This writes {count} replaced {segments} into {files} in the game's Sounds \
+                     folder{maps}. Before a file is first changed, the game's own file is \
                      copied beside it, ending in .orig, so it can be put back."
                 ))
                 .wrap(),
@@ -229,13 +237,15 @@ impl SCModToolApp {
 }
 
 /// The controls for which part of a file of `length` samples to use and how
-/// to fit it to `target` samples, returning the options as changed.
+/// to fit it to `target` samples, returning the options as changed. Only a
+/// segment that `can_change_length` offers to keep the file's own length.
 fn fit_options(
     ui: &mut egui::Ui,
     current: &FitOptions,
     length: usize,
     target: usize,
     rate: u32,
+    can_change_length: bool,
 ) -> FitOptions {
     let rate_f = f64::from(rate.max(1));
     let mut fit = current.clone();
@@ -297,15 +307,25 @@ fn fit_options(
                 .color(ui.visuals().warn_fg_color),
         );
     }
-    ui.radio_value(
-        &mut fit.mode,
-        FitMode::KeepLength,
-        "Keep its own length (experimental)",
-    )
-    .on_hover_text(
-        "The segments after it in the bank move, and the sound map, MAPS.LM0, is changed to \
-         match.",
-    );
+    let keep_length = ui
+        .add_enabled(
+            can_change_length,
+            egui::RadioButton::new(
+                fit.mode == FitMode::KeepLength,
+                "Keep its own length (experimental)",
+            ),
+        )
+        .on_hover_text(
+            "The segments after it in the bank move, and the sound map, MAPS.LM0, is changed \
+             to match.",
+        )
+        .on_disabled_hover_text(
+            "A sound stored in a sound map has to keep its length, as another would move \
+             every sound after it.",
+        );
+    if keep_length.clicked() {
+        fit.mode = FitMode::KeepLength;
+    }
     if fit.mode == FitMode::KeepLength && selected != target {
         ui.add(
             egui::Label::new(
@@ -353,7 +373,7 @@ mod tests {
     use crate::app::edits::ReplacementDraft;
     use crate::app::test_support::{bank, stream_segment};
     use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
+    use egui_kittest::kittest::{NodeT, Queryable};
     use egui_material_icons::icons::ICON_SAVE;
 
     use eframe::egui::accesskit::Role;
@@ -394,7 +414,7 @@ mod tests {
         harness.run();
         let app = harness.state();
         assert!(app.draft.is_none());
-        assert_eq!(app.edits.bank_len(BANK), 1);
+        assert_eq!(app.edits.bank_len(BANK, None), 1);
 
         // The inspector offers to revert it.
         harness
@@ -416,6 +436,36 @@ mod tests {
         assert_eq!(draft.fit.mode, FitMode::KeepLength);
         // The file is as long as the segment, so nothing else changes.
         harness.get_by_role_and_label(Role::Button, "Replace");
+    }
+
+    #[test]
+    fn a_sound_stored_in_a_map_keeps_its_length() {
+        let mut harness = harness();
+        {
+            let draft = harness.state_mut().draft.as_mut().unwrap();
+            draft.bank_path = "MAPS.SM0".to_owned();
+            draft.segment.source = sc_mod_tool_core::SegmentSource::MapSound {
+                subsong: 1,
+                key: Some(1),
+                areas: Vec::new(),
+                stream: Some(sc_mod_tool_core::FileStream {
+                    path: "MAPS.SM0".to_owned(),
+                    offsets: vec![64, 128],
+                    byte_length: 20,
+                    format: StreamFormat::Pcm16,
+                }),
+            };
+        }
+        harness.run();
+        let keep =
+            harness.get_by_role_and_label(Role::RadioButton, "Keep its own length (experimental)");
+        assert!(keep.accesskit_node().is_disabled());
+        keep.click();
+        harness.run();
+        assert_eq!(
+            harness.state().draft.as_ref().unwrap().fit.mode,
+            FitMode::TrimPad
+        );
     }
 
     #[test]

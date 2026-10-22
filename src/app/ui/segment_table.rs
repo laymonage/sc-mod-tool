@@ -45,7 +45,7 @@ impl SCModToolApp {
                     actions.push(Action::ExportBank);
                 }
             }
-            let replaced = self.edits.bank_len(&bank.path);
+            let replaced = self.edits.bank_len(&bank.path, bank.sound_kind);
             if replaced > 0
                 && ui
                     .button(format!("{} Revert bank", ICON_UNDO.codepoint))
@@ -55,7 +55,7 @@ impl SCModToolApp {
                     })
                     .clicked()
             {
-                actions.push(Action::RevertBank(bank.path.clone()));
+                actions.push(Action::RevertBank(bank.path.clone(), bank.sound_kind));
             }
             ui.with_layout(
                 Layout::left_to_right(Align::Center).with_main_wrap(true),

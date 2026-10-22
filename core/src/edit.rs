@@ -7,6 +7,7 @@
 //! saved with it.
 
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use crate::sound_map_file::{
     OFFSET, Placement, SAMPLE_COUNT, SIZE, SIZE_AGAIN, SoundMapFile, audio_resource,
 };
 use crate::sounds_folder::{find_file, find_sounds_directory, safe_child_path};
-use crate::{Error, Segment, decoder, read_segment_with_cancel};
+use crate::{Error, Segment, StreamFormat, decoder, read_segment_with_cancel};
 
 /// A stream to put in place of the one at `offset` in a bank.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +53,8 @@ pub enum SaveTarget {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SaveReport {
     pub written: Vec<PathBuf>,
-    /// The paths of the banks written, as the edits gave them.
+    /// The paths of the files written that the edits named, as they gave
+    /// them: banks, other `.LS0` files, and maps with sounds stored in them.
     pub saved: Vec<String>,
     /// The sound maps written to match banks whose streams moved, relative
     /// to `Sounds`.
@@ -69,7 +71,8 @@ impl SaveReport {
 }
 
 /// Encodes `samples` as a replacement for `segment`, a segment of the bank at
-/// `bank_path` whose stream can be replaced, keeping the stream's header.
+/// `bank_path` whose stream can be replaced, in the stream's format. A Ubisoft
+/// ADPCM stream keeps its header.
 pub fn encode_replacement(
     root: &Path,
     bank_path: &str,
@@ -77,20 +80,35 @@ pub fn encode_replacement(
     samples: &[i16],
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>, Error> {
-    let (file, offset, _) = segment.replaceable_stream(bank_path).ok_or(CANT_REPLACE)?;
-    let header =
-        read_segment_with_cancel(root, file, offset, STREAM_HEADER_SIZE as u64, cancelled)?;
-    encode_stream(&StreamHeader::parse(&header)?, samples, cancelled)
+    let stream = segment.replaceable_stream(bank_path).ok_or(CANT_REPLACE)?;
+    match stream.format {
+        StreamFormat::UbisoftAdpcm => {
+            let header = read_segment_with_cancel(
+                root,
+                stream.path,
+                stream.offsets[0],
+                STREAM_HEADER_SIZE as u64,
+                cancelled,
+            )?;
+            encode_stream(&StreamHeader::parse(&header)?, samples, cancelled)
+        }
+        StreamFormat::Pcm16 => Ok(samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect()),
+    }
 }
 
 /// Why a segment can't be replaced.
-pub const CANT_REPLACE: &str =
-    "Only voice lines in .LS0 files can be replaced: the numbered banks' and Music_Common.LS0's.";
+pub const CANT_REPLACE: &str = "Only dialogue, Lambert's alarm warnings, and sounds stored in the \
+     sound maps as mono 16-bit PCM can be replaced.";
 
 /// A file [`save`] writes.
 struct Output {
-    /// Its path relative to `Sounds`: for a bank, as its edit gave it.
+    /// Its path relative to `Sounds`: for a file edits name, as they gave it.
     path: String,
+    /// Whether edits name it, rather than it only changing to match them.
+    edited: bool,
     /// The game's file.
     source: PathBuf,
     /// The game's file relative to `Sounds`, with its own spelling.
@@ -155,6 +173,8 @@ pub fn save(
     let mut groups = Vec::new();
     // The banks whose streams move, by the map beside them.
     let mut moved: Vec<(PathBuf, Vec<MovedBank>)> = Vec::new();
+    // The maps with replacements of their own.
+    let mut edited_maps = Vec::new();
     for edit in edits.iter().filter(|edit| !edit.replacements.is_empty()) {
         // The resolved path, which has the file's own name however `edit`
         // spells it, so that two spellings of one bank are caught.
@@ -168,6 +188,7 @@ pub fn save(
                 .iter()
                 .flat_map(|(_, banks)| banks)
                 .any(|moved| same_file(&moved.bank))
+            || edited_maps.iter().any(same_file)
         {
             return Err(format!(
                 "{} is edited more than once: its replacements must be saved together.",
@@ -177,10 +198,23 @@ pub fn save(
         }
         let original = fs::read(&source)
             .map_err(|error| format!("Could not read {}: {error}", source.display()))?;
+        if is_sound_map(&edit.path) {
+            edited_maps.push(Output {
+                path: edit.path.clone(),
+                edited: true,
+                relative: relative_to_sounds(&source, &edit.path)?,
+                source,
+                // Read again if it has to match banks too.
+                original: None,
+                bytes: splice_clips(original, &edit.path, &edit.replacements)?,
+            });
+            continue;
+        }
         let rebuilt = rebuild_ls0(&original, &edit.path, &edit.replacements, cancelled)?;
         let moves = rebuilt.before != rebuilt.after;
         let bank = Output {
             path: edit.path.clone(),
+            edited: true,
             relative: relative_to_sounds(&source, &edit.path)?,
             source,
             original: (moves && in_place).then_some(original),
@@ -206,11 +240,36 @@ pub fn save(
     }
 
     for (source, banks) in moved {
-        let mut bytes = fs::read(&source)
-            .map_err(|error| format!("Could not read {}: {error}", source.display()))?;
-        let relative = relative_to_sounds(&source, "MAPS.LM0")?;
-        let path = relative.to_string_lossy().replace('\\', "/");
-        let original = in_place.then(|| bytes.clone());
+        let read = || {
+            fs::read(&source)
+                .map_err(|error| format!("Could not read {}: {error}", source.display()))
+        };
+        // The map with its own replacements, if it has any.
+        let edited = edited_maps
+            .iter()
+            .position(|map| map.source == source)
+            .map(|index| edited_maps.swap_remove(index));
+        let (mut bytes, original, path, relative, edited) = match edited {
+            Some(map) => (
+                map.bytes,
+                in_place.then(read).transpose()?,
+                map.path,
+                map.relative,
+                true,
+            ),
+            None => {
+                let bytes = read()?;
+                let relative = relative_to_sounds(&source, "MAPS.LM0")?;
+                let path = relative.to_string_lossy().replace('\\', "/");
+                (
+                    bytes.clone(),
+                    in_place.then_some(bytes),
+                    path,
+                    relative,
+                    false,
+                )
+            }
+        };
         let names: Vec<_> = banks
             .iter()
             .map(|moved| {
@@ -227,12 +286,14 @@ pub fn save(
             .zip(&names)
             .map(|(moved, name)| (name.as_ref(), &moved.before[..], &moved.after[..]))
             .collect();
-        // A map that has none of the banks' streams stays as it is.
-        let changed = patch_map(&mut bytes, &path, &streams)? > 0;
+        // A map that has none of the banks' streams, and no replacements of
+        // its own, stays as it is.
+        let changed = patch_map(&mut bytes, &path, &streams)? > 0 || edited;
         drop(streams);
         groups.push(Group {
             map: changed.then_some(Output {
                 path,
+                edited,
                 source,
                 relative,
                 original,
@@ -241,6 +302,10 @@ pub fn save(
             banks: banks.into_iter().map(|moved| moved.bank).collect(),
         });
     }
+    groups.extend(edited_maps.into_iter().map(|map| Group {
+        map: Some(map),
+        banks: Vec::new(),
+    }));
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
@@ -250,6 +315,57 @@ pub fn save(
         write_group(group, folder.as_deref(), &mut report);
     }
     Ok(report)
+}
+
+/// Whether the file at `path` is a sound map, `MAPS.SM0` or `MAPS.LM0`.
+pub fn is_sound_map(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension.eq_ignore_ascii_case("SM0") || extension.eq_ignore_ascii_case("LM0")
+    })
+}
+
+/// `map`, the sound map at `map_path`, with `replacements` in place of clips
+/// stored in it. Each has to be the same length as its clip: another length
+/// would move everything after it in the map.
+pub(crate) fn splice_clips(
+    mut map: Vec<u8>,
+    map_path: &str,
+    replacements: &[Replacement],
+) -> Result<Vec<u8>, Error> {
+    let file = SoundMapFile::parse(&map).map_err(|error| format!("{map_path} {error}."))?;
+    let clips: HashMap<u64, u64> = file
+        .areas()
+        .iter()
+        .flat_map(|area| file.stored_clips(area))
+        .filter(|clip| clip.channels == 1)
+        .map(|clip| (clip.offset, clip.length))
+        .collect();
+    let mut replaced = HashSet::new();
+    for replacement in replacements {
+        let offset = replacement.offset;
+        let Some(&length) = clips.get(&offset) else {
+            return Err(
+                format!("{map_path} has no sound stored at offset {offset} to replace.").into(),
+            );
+        };
+        if !replaced.insert(offset) {
+            return Err(format!(
+                "The sound at offset {offset} in {map_path} is replaced more than once."
+            )
+            .into());
+        }
+        if replacement.stream.len() as u64 != length {
+            return Err(format!(
+                "The replacement for the sound at offset {offset} in {map_path} is {} bytes \
+                 long, but a sound stored in a map has to keep its length, {length} bytes.",
+                replacement.stream.len()
+            )
+            .into());
+        }
+        let start = offset as usize;
+        map[start..start + replacement.stream.len()].copy_from_slice(&replacement.stream);
+    }
+    Ok(map)
 }
 
 /// The sound map beside the bank at `source`, which describes it.
@@ -353,12 +469,12 @@ fn write_group(group: &Group, folder: Option<&Path>, report: &mut SaveReport) {
         report.failures.push(failure);
         return;
     }
-    for ((output, is_map), (destination, _)) in files.into_iter().zip(previous) {
+    for ((output, _), (destination, _)) in files.into_iter().zip(previous) {
         report.written.push(destination);
-        if is_map {
-            report.maps.push(output.path.clone());
-        } else {
+        if output.edited {
             report.saved.push(output.path.clone());
+        } else {
+            report.maps.push(output.path.clone());
         }
     }
 }
@@ -1302,6 +1418,98 @@ mod tests {
     }
 
     #[test]
+    fn sounds_stored_in_a_map_are_spliced_in_at_their_length() {
+        use crate::sound_map_file::tests::map_with_clips;
+
+        let map = map_with_clips(
+            &[&[(1, "DOOR.wav", &[1, 2, 3]), (2, "STEP.wav", &[4, 5])]],
+            &[],
+        );
+        let file = SoundMapFile::parse(&map).unwrap();
+        let clips = file.stored_clips(&file.areas()[0]);
+        let step = clips[1].offset;
+        let replacement = |offset, samples: &[i16]| Replacement {
+            offset,
+            stream: samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect(),
+        };
+
+        let spliced =
+            splice_clips(map.clone(), "MAPS.SM0", &[replacement(step, &[-1, -2])]).unwrap();
+        let start = step as usize;
+        assert_eq!(spliced[..start], map[..start]);
+        assert_eq!(spliced[start..start + 4], [0xFF, 0xFF, 0xFE, 0xFF]);
+        assert_eq!(spliced[start + 4..], map[start + 4..]);
+
+        for (replacements, error) in [
+            (
+                vec![replacement(step, &[1, 2, 3])],
+                "has to keep its length",
+            ),
+            (
+                vec![replacement(step + 2, &[1])],
+                "no sound stored at offset",
+            ),
+            (
+                vec![replacement(step, &[1, 2]), replacement(step, &[3, 4])],
+                "more than once",
+            ),
+        ] {
+            let found = splice_clips(map.clone(), "MAPS.SM0", &replacements)
+                .unwrap_err()
+                .to_string();
+            assert!(found.contains(error), "{found}");
+        }
+    }
+
+    #[test]
+    fn a_map_with_sounds_of_its_own_also_follows_its_banks() {
+        use crate::sound_map_file::tests::map_with_clips;
+
+        let (game, bank, offsets) = game();
+        let streams: Vec<_> = placements(&bank)
+            .into_iter()
+            .map(|stream| ("1_1_0.LS0", stream))
+            .collect();
+        let map = map_with_clips(&[&[(1, "DOOR.wav", &[1, 2, 3])]], &streams);
+        let english = game.path().join("Sounds/ENGLISH");
+        fs::write(english.join("MAPS.LM0"), &map).unwrap();
+        let file = SoundMapFile::parse(&map).unwrap();
+        let door = file.stored_clips(&file.areas()[0])[0].offset;
+        let edits = [
+            BankEdit {
+                path: "ENGLISH/MAPS.LM0".to_owned(),
+                replacements: vec![Replacement {
+                    offset: door,
+                    stream: vec![9; 6],
+                }],
+            },
+            edit("ENGLISH/1_1_0.LS0", offsets[1], 7000),
+        ];
+        let report = save(
+            game.path(),
+            &edits,
+            &SaveTarget::InPlace,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(report.is_complete(), "{:?}", report.failures);
+        assert_eq!(report.saved, ["ENGLISH/MAPS.LM0", "ENGLISH/1_1_0.LS0"]);
+        assert!(report.maps.is_empty());
+        assert_eq!(fs::read(english.join("MAPS.LM0.orig")).unwrap(), map);
+
+        // The map has both its own replacement and its bank's new places.
+        let saved = fs::read(english.join("MAPS.LM0")).unwrap();
+        let start = door as usize;
+        assert_eq!(saved[start..start + 6], [9; 6]);
+        let bank = placements(&fs::read(english.join("1_1_0.LS0")).unwrap());
+        let found = resources_in(&saved, "", &[("1_1_0.LS0", &bank)]).unwrap();
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
     fn length_changes_are_checked_before_saving() {
         let (game, _, offsets, _) = game_with_map();
         let cancelled = AtomicBool::new(false);
@@ -1577,19 +1785,21 @@ mod tests {
                     .segments
                     .iter()
                     .filter_map(|segment| Some((segment, segment.replaceable_stream(&bank.path)?)))
+                    .filter(|(_, stream)| stream.format == StreamFormat::UbisoftAdpcm)
                     .collect();
                 if bank.sound_kind.is_none() || streams.is_empty() {
                     continue;
                 }
                 // The scan finds the streams the map points at, and no others.
-                let (file, ..) = streams[0].1;
+                let file = streams[0].1.path;
                 let mut found: Vec<_> = streams
                     .iter()
-                    .map(|(segment, (path, offset, length))| {
-                        assert_eq!(*path, file, "{}", segment.id);
+                    .map(|(segment, stream)| {
+                        assert_eq!(stream.path, file, "{}", segment.id);
+                        assert_eq!(stream.offsets.len(), 1, "{}", segment.id);
                         Placement {
-                            offset: *offset,
-                            length: *length,
+                            offset: stream.offsets[0],
+                            length: stream.byte_length,
                             sample_count: segment.sample_count,
                         }
                     })
@@ -1607,7 +1817,7 @@ mod tests {
 
                 let (segment, _) = streams
                     .iter()
-                    .find(|(_, (_, offset, _))| *offset == 0)
+                    .find(|(_, stream)| stream.offsets == [0])
                     .unwrap();
                 let samples = tone(segment.sample_count as usize + 5000, 6000.0);
                 let stream =
@@ -1640,6 +1850,99 @@ mod tests {
                 "{}",
                 edit.path
             );
+        }
+    }
+
+    /// Checks that every sound stored in the English maps as mono 16-bit PCM
+    /// is where the app says, by comparing each copy with what vgmstream
+    /// plays, then replaces one in `MAPS.SM0` and one in an extra map's
+    /// `MAPS.LM0`, and checks that every copy changed and nothing else.
+    #[test]
+    #[ignore = "requires local Splinter Cell game files; set SC1_GAME_DIR"]
+    fn replaces_sounds_stored_in_maps() {
+        let game_root = std::env::var_os("SC1_GAME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Splinter Cell"));
+        let cancelled = AtomicBool::new(false);
+        let sounds = find_sounds_directory(&game_root).unwrap();
+        let banks = crate::discover_banks(&game_root, "ENGLISH").unwrap();
+        let mut maps = std::collections::BTreeMap::<&str, Vec<u8>>::new();
+        let mut chosen = std::collections::BTreeMap::<&str, (&Segment, Vec<u64>)>::new();
+        let mut checked = 0;
+        for bank in &banks {
+            for segment in &bank.segments {
+                let Some(stream) = segment.replaceable_stream(&bank.path) else {
+                    continue;
+                };
+                if stream.format != StreamFormat::Pcm16 {
+                    continue;
+                }
+                assert_eq!(stream.path, bank.path);
+                let map = maps
+                    .entry(&bank.path)
+                    .or_insert_with(|| fs::read(sounds.join(&bank.path)).unwrap());
+                let length = stream.byte_length as usize;
+                let first = &map[stream.offsets[0] as usize..][..length];
+                for &offset in stream.offsets {
+                    assert!(&map[offset as usize..][..length] == first, "{}", segment.id);
+                }
+                let played =
+                    crate::decode_segment(&game_root, &bank.path, segment, &cancelled).unwrap();
+                let stored: Vec<i16> = first
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| i16::from_le_bytes(*pair))
+                    .collect();
+                assert!(played.samples == stored, "{}", segment.id);
+                checked += 1;
+                chosen
+                    .entry(&bank.path)
+                    .or_insert((segment, stream.offsets.to_vec()));
+            }
+        }
+        assert!(checked > 900, "only {checked} sounds");
+
+        let edits: Vec<_> = ["MAPS.SM0", "1_6_1_1kolacell/English/MAPS.LM0"]
+            .into_iter()
+            .map(|path| {
+                let (segment, offsets) = &chosen[path];
+                let samples = tone(segment.sample_count as usize, 6000.0);
+                let stream =
+                    encode_replacement(&game_root, path, segment, &samples, &cancelled).unwrap();
+                BankEdit {
+                    path: path.to_owned(),
+                    replacements: offsets
+                        .iter()
+                        .map(|&offset| Replacement {
+                            offset,
+                            stream: stream.clone(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        let output = tempfile::tempdir().unwrap();
+        let target = SaveTarget::Folder(output.path().to_owned());
+        let report = save(&game_root, &edits, &target, &cancelled).unwrap();
+        assert!(report.is_complete(), "{:?}", report.failures);
+        assert_eq!(
+            report.saved,
+            ["MAPS.SM0", "1_6_1_1kolacell/English/MAPS.LM0"]
+        );
+        assert!(report.maps.is_empty());
+        let exported = output.path().canonicalize().unwrap().join("Sounds");
+        for edit in &edits {
+            let original = &maps[edit.path.as_str()];
+            let saved = fs::read(exported.join(&edit.path)).unwrap();
+            let mut expected = original.clone();
+            for replacement in &edit.replacements {
+                let start = replacement.offset as usize;
+                expected[start..start + replacement.stream.len()]
+                    .copy_from_slice(&replacement.stream);
+            }
+            assert_ne!(&expected, original);
+            assert!(saved == expected, "{}: other bytes changed", edit.path);
         }
     }
 }
