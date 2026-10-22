@@ -107,6 +107,8 @@ pub(crate) struct CompiledLinks {
     links: Vec<BridgeLink>,
     issues: Vec<String>,
     patterns: Vec<BridgePattern>,
+    /// The folder whose packages replaced the game's, if any.
+    override_folder: Option<String>,
 }
 
 /// Matches `language`'s sound banks to subtitle cues.
@@ -123,6 +125,22 @@ pub fn load_verified_subtitles(
     banks: &[super::Bank],
     cache: &mut GameCache,
     cancelled: &AtomicBool,
+) -> Result<SubtitleAnalysis, Error> {
+    load_verified_subtitles_with_override(root, language, banks, cache, cancelled, None)
+}
+
+/// Like [`load_verified_subtitles`], but with `override_folder`, a folder
+/// under `system` whose script packages and `LOCALIZATION` files replace the
+/// game's, such as EnhancedSC's `Enhanced`.
+///
+/// `cache` keeps UELib's analysis for one override at a time.
+pub fn load_verified_subtitles_with_override(
+    root: &Path,
+    language: &str,
+    banks: &[super::Bank],
+    cache: &mut GameCache,
+    cancelled: &AtomicBool,
+    override_folder: Option<&str>,
 ) -> Result<SubtitleAnalysis, Error> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
@@ -169,16 +187,36 @@ pub fn load_verified_subtitles(
         });
     }
 
+    let system_root = game_root.join("system");
+    let mut localization_roots = vec![system_root.join("LOCALIZATION")];
+    if let Some(folder) = override_folder {
+        let unchecked_root = system_root.join(folder);
+        if !unchecked_root.is_dir() {
+            return Err(format!(
+                "Override folder was not found: {}",
+                unchecked_root.display()
+            )
+            .into());
+        }
+        // Keeps the folder inside system.
+        let override_root = safe_child_path(&system_root, folder)?;
+        let override_localization = override_root.join("LOCALIZATION");
+        if override_localization.is_dir() {
+            localization_roots.push(override_localization);
+        }
+    }
+
     let bridge = match &cache.compiled_links {
-        Some(links) => Arc::clone(links),
-        None => {
-            let result = scan_compiled_links(game_root, cancelled)?;
+        Some(links) if links.override_folder.as_deref() == override_folder => Arc::clone(links),
+        _ => {
+            let result = scan_compiled_links(game_root, override_folder, cancelled)?;
             cache
                 .compiled_links
                 .insert(Arc::new(CompiledLinks {
                     links: result.links,
                     issues: result.issues,
                     patterns: result.patterns,
+                    override_folder: override_folder.map(str::to_owned),
                 }))
                 .clone()
         }
@@ -212,7 +250,6 @@ pub fn load_verified_subtitles(
         );
     }
 
-    let localization_root = game_root.join("system").join("LOCALIZATION");
     let mut localization_cache = HashMap::<PathBuf, String>::new();
     for link in &bridge.links {
         if cancelled.load(Ordering::Relaxed) {
@@ -228,7 +265,7 @@ pub fn load_verified_subtitles(
         };
 
         let localization_path =
-            match localization_path(&localization_root, &link.localization_file, extension) {
+            match find_localization(&localization_roots, &link.localization_file, extension) {
                 Ok(path) => path,
                 Err(warning) => {
                     push_warning(&mut analysis.warnings, warning);
@@ -273,13 +310,13 @@ pub fn load_verified_subtitles(
         analysis.mapped_pairs += 1;
     }
 
-    match localization_sections(&localization_root, extension) {
+    match localization_sections(&localization_roots, extension) {
         Ok(sections) => {
             // Scenes are aligned against English, the language they were written in.
             let english = if extension == "int" {
                 None
             } else {
-                localization_sections(&localization_root, "int").ok()
+                localization_sections(&localization_roots, "int").ok()
             };
             for pattern in &bridge.patterns {
                 if cancelled.load(Ordering::Relaxed) {
@@ -316,6 +353,24 @@ pub fn load_verified_subtitles(
     }
     analysis.warnings.sort();
     Ok(analysis)
+}
+
+/// Finds a localization file in the last of `roots` that has it.
+fn find_localization(
+    roots: &[PathBuf],
+    base_name: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
+    let mut result = Err(format!(
+        "Localization file {base_name}.{extension} was not found."
+    ));
+    for root in roots.iter().rev() {
+        result = localization_path(root, base_name, extension);
+        if result.is_ok() {
+            break;
+        }
+    }
+    result
 }
 
 /// Adds a subtitle to a segment, merging its sources into an identical one.
@@ -423,6 +478,37 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn rejects_a_missing_override_folder_before_running_uelib() {
+        let game = tempfile::tempdir().unwrap();
+        fs::create_dir_all(game.path().join("Sounds").join("ENGLISH")).unwrap();
+        fs::write(
+            game.path().join("Sounds").join("ENGLISH").join("MAPS.LM0"),
+            [],
+        )
+        .unwrap();
+        fs::create_dir_all(game.path().join("system").join("LOCALIZATION")).unwrap();
+        let mut cache = GameCache::default();
+
+        let error = load_verified_subtitles_with_override(
+            game.path(),
+            "ENGLISH",
+            &[],
+            &mut cache,
+            &AtomicBool::new(false),
+            Some("Enhanced"),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("Override folder was not found: "),
+            "{error}"
+        );
+        assert!(!cache.has_read_scripts());
     }
 
     #[test]
