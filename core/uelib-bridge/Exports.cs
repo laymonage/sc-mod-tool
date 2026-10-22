@@ -12,7 +12,11 @@ namespace SCModUELibBridge;
 public static unsafe class Exports
 {
     [UnmanagedCallersOnly(EntryPoint = "scmod_scan_script_audio_links", CallConvs = [typeof(CallConvCdecl)])]
-    public static int ScanScriptAudioLinks(byte* gameRootUtf8, byte* outputUtf8, int outputCapacity)
+    public static int ScanScriptAudioLinks(
+        byte* gameRootUtf8,
+        byte* overrideFolderUtf8,
+        byte* outputUtf8,
+        int outputCapacity)
     {
         try
         {
@@ -28,7 +32,9 @@ public static unsafe class Exports
                 return WriteFailure(outputUtf8, outputCapacity, "Game directory path is null.");
             }
 
-            var result = AnalyzeGame(gameRoot, log);
+            // Null for the game's own packages.
+            var overrideFolder = Marshal.PtrToStringUTF8((nint)overrideFolderUtf8);
+            var result = AnalyzeGame(gameRoot, overrideFolder, log);
             return WriteResult(outputUtf8, outputCapacity, result);
         }
         catch (Exception error)
@@ -37,13 +43,18 @@ public static unsafe class Exports
         }
     }
 
-    private static BridgeResult AnalyzeGame(string gameRoot, BridgeLog log)
+    private static BridgeResult AnalyzeGame(string gameRoot, string? overrideFolder, BridgeLog log)
     {
         var systemRoot = Path.Combine(gameRoot, "system");
         var soundsRoot = Path.Combine(gameRoot, "Sounds");
         if (!Directory.Exists(systemRoot))
         {
             throw new DirectoryNotFoundException($"Game system directory was not found: {systemRoot}");
+        }
+        var overrideRoot = overrideFolder is null ? null : Path.Combine(systemRoot, overrideFolder);
+        if (overrideRoot is not null && !Directory.Exists(overrideRoot))
+        {
+            throw new DirectoryNotFoundException($"Script override directory was not found: {overrideRoot}");
         }
         if (!Directory.Exists(soundsRoot))
         {
@@ -61,7 +72,7 @@ public static unsafe class Exports
 
         var sourcePairs = new HashSet<SourcePair>();
         var patterns = new Dictionary<string, PatternCalls>(StringComparer.Ordinal);
-        foreach (var packagePath in FindScriptPackages(systemRoot))
+        foreach (var packagePath in FindScriptPackages(systemRoot, overrideRoot))
         {
             try
             {
@@ -221,18 +232,21 @@ public static unsafe class Exports
         return new BridgeResult(links, issues, patternResults);
     }
 
-    private static IEnumerable<string> FindScriptPackages(string systemRoot)
+    /// <summary>
+    /// The script packages the game loads: those in <c>system</c>, replaced by
+    /// any of the same name in <c>system/update</c>, then in
+    /// <paramref name="overrideRoot"/>, such as EnhancedSC's <c>system/Enhanced</c>.
+    /// </summary>
+    private static IEnumerable<string> FindScriptPackages(string systemRoot, string? overrideRoot)
     {
         var packages = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var path in Directory.EnumerateFiles(systemRoot, "*.u", SearchOption.TopDirectoryOnly))
+        foreach (var directory in new[] { systemRoot, Path.Combine(systemRoot, "update"), overrideRoot })
         {
-            packages[Path.GetFileName(path)] = path;
-        }
-
-        var updateRoot = Path.Combine(systemRoot, "update");
-        if (Directory.Exists(updateRoot))
-        {
-            foreach (var path in Directory.EnumerateFiles(updateRoot, "*.u", SearchOption.TopDirectoryOnly))
+            if (directory is null || !Directory.Exists(directory))
+            {
+                continue;
+            }
+            foreach (var path in Directory.EnumerateFiles(directory, "*.u", SearchOption.TopDirectoryOnly))
             {
                 packages[Path.GetFileName(path)] = path;
             }
