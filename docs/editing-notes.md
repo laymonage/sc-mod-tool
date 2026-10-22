@@ -36,20 +36,48 @@ would avoid that, if the game allows it.
 
 ## What the game showed
 
-Both were tested in the game, on English data:
+These were tested in the game, on English data:
 
-- **A replacement of the same length plays,** in several levels. It's spliced
-  into its bank, and nothing else changes.
+- **A replacement of the same length plays,** in several levels.
 - **The game follows an edited `MAPS.LM0`.** A line's resource was pointed at
   another, shorter stream in its bank: its offset, both sizes and its sample
   count. The game played the other stream in the line's place, and showed the
   line's subtitle only for the new stream's length, 0.4 s instead of 8.8 s.
   So nothing checks the map, and a subtitle lasts as long as the audio the
   map gives its line.
+- **A replacement of another length plays too,** saved by the app, with the
+  bank laid out again and its map changed to match.
 
-That's what replacing at another length relies on. The new stream goes where
-the old one was, the streams after it move, and every resource pointing into
-the bank is changed to match, in every area that has it.
+## How saving works
+
+A replacement of the same length is spliced into its bank, and nothing else
+changes. One of another length goes where the old stream was, followed by
+fresh padding to the next 4 bytes, and the streams after it move. Every
+resource pointing into the bank is changed to match, in every area of the
+`MAPS.LM0` beside it: its offset, both sizes and its sample count. No
+`MAPS.SM0` points into a numbered bank, so that's the only map that changes.
+
+This relies on the banks' simple layout ([sound banks](sound-banks.md)). So
+before the app accepts a replacement of another length, it checks that only
+padding follows the stream, that the map is there, and that every resource
+in the bank is at one of its streams. Saving checks again.
+
+Saving builds and checks every file before writing any:
+
+- Each rebuilt bank is scanned again. It must have the same streams, at the
+  places expected, and the new ones must decode.
+- Each changed map is read back, and every resource must be at its stream in
+  the new layout.
+- Files are written to a temporary file, then renamed over the old one.
+- A map and the banks it describes are written together. If one can't be
+  written, those already written are put back as they were.
+
+**Save** writes over the game's files, asking first: once, and again the first
+time a save changes a map. Before a file is first changed, it's copied beside
+itself with `.orig` added to its name, and later saves keep that copy.
+**Save to folder** writes only the changed files, into a folder laid out like
+`Sounds`, and leaves the game alone. Exported files from an earlier export
+stay in the folder, even if their replacements were reverted since.
 
 ## Still to find out
 
@@ -77,14 +105,14 @@ the bank is changed to match, in every area that has it.
 ## What the app keeps while it runs
 
 Two things in the app assume the game's files don't change while it's open,
-and editing will break both:
+so saving has to work around them:
 
 - **The game cache.** `GameCache` keeps the banks read from each sound map
   and UELib's analysis of the scripts, so switching languages doesn't read
-  them again. Only Rescan or opening another game folder clears it. Saving a
-  map, a bank or a script package has to clear it too, or the app keeps
-  showing what was there before.
+  them again. Saving in place replaces the cache and scans again. A segment
+  that moved has a new ID, as IDs hold the stream's offset, so it may not be
+  selected again afterwards.
 - **Mapped files.** While a scan lists a map's sounds, the map is mapped into
   memory. Truncating it then would crash the app, and Windows won't let a
-  mapped file be replaced. A save shouldn't run during a scan, and writing to
-  a new file and renaming it over the old one is safer than writing in place.
+  mapped file be replaced. So saving waits for scans, scanning waits for
+  saves, and files are renamed over, never written in place.

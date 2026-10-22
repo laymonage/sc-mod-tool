@@ -8,10 +8,12 @@ music and streams in the game's sound maps (`MAPS.SM0` and each language's
 everything.
 
 Segments in the numeric banks can be replaced with any audio FFmpeg reads,
-trimmed, padded or sped up to the segment's length. Replacements are kept until
-you save them: over the game's files, after copying each original beside it
-with `.orig` added to its name, or into a separate folder laid out like the
-game's `Sounds` folder. Nothing is written until you save.
+trimmed, padded or sped up to the segment's length, or kept at its own length.
+A replacement of another length moves the segments after it in its bank, and
+the language's `MAPS.LM0` is changed to match. Replacements are kept until you
+save them: over the game's files, after copying each original beside it with
+`.orig` added to its name, or into a separate folder laid out like the game's
+`Sounds` folder. Nothing is written until you save.
 
 Subtitles come from the game's compiled UnrealScript and localization files,
 matched to segments through `.uax` sound keys and `MAPS.LM0`. This includes
