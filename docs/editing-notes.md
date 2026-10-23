@@ -71,9 +71,9 @@ area offsets and tables rewriting. Each area that plays the sound has its own
 copy ([sound maps](sound-maps.md#audio-stored-in-a-map)), so every copy is
 replaced. Only mono sounds can be: a few in the extra maps are stereo. The
 conversion targets the rate the game plays the sound at, which an event's
-pitch can make lower than the rate it's stored at, so that it plays at the
-right speed. Saving writes the whole map, which is 218 MB for `MAPS.SM0`, and
-saving in place copies it to `MAPS.SM0.orig` first. The
+pitch can make lower or higher than the rate it's stored at, so that it
+plays at the right speed. Saving writes the whole map, which is 218 MB for
+`MAPS.SM0`, and saving in place copies it to `MAPS.SM0.orig` first. The
 game's maps meet that: in each language's, the audio resources in the file
 have 4 keys, one for each stream, repeated across areas. The 36 other keys
 naming it are switches' and random choices', whose file name is left over.

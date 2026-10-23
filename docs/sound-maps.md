@@ -120,8 +120,9 @@ Almost every event's pitch is 1.0 (`0x10000`), but the Chinese and Georgian
 soldiers', the Elite Force's and the Ex-Spetsnaz's barks (`CSO*`, `GSO*`,
 `EFO*`, `EXS*`) are stored at 16,000 Hz and played at two thirds of that
 (`0xAADA`), 10,678 Hz. Played at their stored rate, they sound too fast and
-too high. Following each `MAPS.LM0` event through its containers gives every
-clip a single pitch.
+too high. A few of [`MAPS.SM0`'s](#maps-sm0s-events) sound effects have a
+pitch too. Following each event through its containers gives every clip a
+single pitch.
 
 vgmstream applies it: for Splinter Cell (PC) maps, it finds the first play
 event that reaches a clip, directly or through containers, and scales the
@@ -159,18 +160,25 @@ in `1_3_2.LS0`. Guessing the bank from the package name gets that wrong.
 
 ## `MAPS.SM0`'s events
 
-`MAPS.SM0`'s resources have the same layout, but most of its events don't use
-`0x40000000` references. Their references have no top bits at all, and read
-as a plain resource index, every one is in range, so that's likely what they
-are. vgmstream only follows tagged references, so it plays `MAPS.SM0`'s sounds
-at their stored rates.
+`MAPS.SM0`'s resources have the same layout, but most of its events and
+containers don't use `0x40000000` references. Their references have no top
+bits at all, and are a plain resource index. A few have `0x80000000` instead,
+which seem to point at the `fix` area's resources. None of those plays a clip
+at a pitch other than 1.0. Its events of types `4` and `10` aren't play or stop
+events, and their `+16` isn't a pitch.
 
-Read that way, a few of its events set a pitch other than 1.0: `ALALAS_1.wav`,
-an alarm, is played at ×1.19 in the Defense Ministry, CIA, Kalinatek and the
-Presidential Palace, and `UZIIIS_1.wav` at ×0.94 at Kalinatek, with others
-through containers. Whether the game applies those pitches hasn't been tested.
-If it does, a replacement of one of those sounds plays faster or slower in the
-game than the app's preview.
+A few of its play events set a pitch other than 1.0, and the game applies it:
+
+| Sound | Clips | Pitch |
+|---|---|---|
+| Laser and metal detector alarm (`Electronic.Play_AlarmeDetecteurLaser`) | `ALALAS_1.wav` | ×1.189 |
+| Makarov and VZ61 shots | `MAKASS_*`, `VZ61S*` | ×0.891 |
+| Uzi shots | `UZIIS*` | ×0.944 |
+
+This was tested by replacing `ALALAS_1.wav` with a 1,000 Hz tone and tripping
+a laser in the Defense Ministry: the game played it at 1,189 Hz, for 0.63 s of
+its 0.74 s. vgmstream follows plain references too, so the app previews and
+converts these clips at the rates the game plays them at.
 
 ## How the app lists them
 
