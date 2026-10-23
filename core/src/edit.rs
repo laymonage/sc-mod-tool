@@ -798,6 +798,15 @@ fn resources_in(
                 continue;
             };
             let (bank_file, streams) = banks[bank];
+            // A looping resource's sample count and size again are split in
+            // two, so `patch_map` can't write them. The game's maps have none
+            // in a bank.
+            if audio.loop_start.is_some() {
+                return Err(format!(
+                    "{map_path} has a looping sound in {bank_file}, so its streams can't be moved."
+                )
+                .into());
+            }
             let stream = audio
                 .placement
                 .and_then(|placement| streams.iter().position(|stream| *stream == placement));

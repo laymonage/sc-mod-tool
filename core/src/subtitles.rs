@@ -374,7 +374,15 @@ mod tests {
         }]
     }
 
+    /// Records of the given keys' audio in [`test_bank`]'s bank.
     pub(super) fn test_records(
+        keys_and_offsets: &[(u32, u32)],
+    ) -> HashMap<u32, HashSet<MapRecord>> {
+        test_records_in("1_1_2.LS0", keys_and_offsets)
+    }
+
+    pub(super) fn test_records_in(
+        bank: &str,
         keys_and_offsets: &[(u32, u32)],
     ) -> HashMap<u32, HashSet<MapRecord>> {
         keys_and_offsets
@@ -388,7 +396,7 @@ mod tests {
                         compressed_bytes: 10,
                         sample_count: 20,
                         sample_rate: 36000,
-                        bank: None,
+                        bank: bank.to_owned(),
                     }]),
                 )
             })

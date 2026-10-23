@@ -155,6 +155,8 @@ struct Replaceable {
     /// The rate it's stored at.
     rate: Option<u32>,
     format: StreamFormat,
+    /// The sample its loop starts at, if it loops.
+    loop_start: Option<u32>,
 }
 
 /// The audio the map `map` describes that can be replaced, by the key of the
@@ -222,6 +224,7 @@ fn file_streams(map: &[u8]) -> HashMap<(u32, String), Option<Replaceable>> {
                         sample_count: placement.sample_count,
                         rate: audio.rate,
                         format: StreamFormat::UbisoftAdpcm,
+                        loop_start: audio.loop_start,
                     });
                 add(audio.key, name, found);
             } else if !name.ends_with(".ss0") {
@@ -244,6 +247,7 @@ fn file_streams(map: &[u8]) -> HashMap<(u32, String), Option<Replaceable>> {
                         sample_count: clip.sample_count,
                         rate: audio.rate,
                         format: StreamFormat::Pcm16,
+                        loop_start: clip.loop_start,
                     });
                 add(identity.0, identity.1, found);
             }
@@ -270,8 +274,19 @@ fn merge(map: &[u8], known: &mut Option<Replaceable>, found: Option<Replaceable>
         // Another area's copy of a clip, the same as the first.
         (Some(mut known), Some(found))
             if known.format == StreamFormat::Pcm16
-                && (found.format, found.length, found.sample_count, found.rate)
-                    == (known.format, known.length, known.sample_count, known.rate)
+                && (
+                    found.format,
+                    found.length,
+                    found.sample_count,
+                    found.rate,
+                    found.loop_start,
+                ) == (
+                    known.format,
+                    known.length,
+                    known.sample_count,
+                    known.rate,
+                    known.loop_start,
+                )
                 && found.areas.iter().all(|area| !known.areas.contains(area))
                 && same_bytes(map, known.offsets[0], found.offsets[0], known.length) =>
         {
@@ -287,12 +302,14 @@ fn merge(map: &[u8], known: &mut Option<Replaceable>, found: Option<Replaceable>
                     known.sample_count,
                     known.rate,
                     known.format,
+                    known.loop_start,
                 ) == (
                     &found.offsets,
                     found.length,
                     found.sample_count,
                     found.rate,
                     found.format,
+                    found.loop_start,
                 ) =>
         {
             Some(known)
@@ -363,6 +380,7 @@ fn add_file_streams(
                 offsets,
                 byte_length: found.length,
                 format: found.format,
+                loop_start: found.loop_start,
             });
         }
     }
@@ -706,6 +724,7 @@ mod tests {
             sample_count: 29_967,
             rate: Some(36_000),
             format: StreamFormat::UbisoftAdpcm,
+            loop_start: None,
         };
         assert_eq!(common(1), Some(Some(first.clone())));
         for key in [2, 3, 4] {

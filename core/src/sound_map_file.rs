@@ -20,9 +20,15 @@ pub(crate) const AUDIO: u32 = 1;
 /// The fields of an audio resource that place its stream in its file.
 pub(crate) const SIZE: usize = 12;
 pub(crate) const OFFSET: usize = 20;
+/// The sample count, or a looping resource's samples before its loop.
 pub(crate) const SAMPLE_COUNT: usize = 48;
-/// The size again.
+/// The size again, or a looping resource's bytes before its loop.
 pub(crate) const SIZE_AGAIN: usize = 52;
+/// The field of an audio resource whose bit 0 is set if it loops.
+pub(crate) const LOOPS: usize = 44;
+/// The fields of a looping resource with its loop's samples and bytes.
+pub(crate) const LOOP_SAMPLE_COUNT: usize = 56;
+pub(crate) const LOOP_SIZE: usize = 60;
 /// The field of an audio resource with its sample rate.
 pub(crate) const RATE: usize = 68;
 /// The field of an audio resource with its codec.
@@ -217,6 +223,7 @@ impl<'a> SoundMapFile<'a> {
                 length: placement.length,
                 sample_count: placement.sample_count,
                 channels: read16(74).unwrap_or(0),
+                loop_start: audio.loop_start,
             });
         }
         clips
@@ -252,6 +259,8 @@ pub(crate) struct StoredClip<'a> {
     pub(crate) length: u64,
     pub(crate) sample_count: u32,
     pub(crate) channels: u16,
+    /// The sample its loop starts at, if it loops.
+    pub(crate) loop_start: Option<u32>,
 }
 
 /// What an audio resource says about its audio.
@@ -261,7 +270,10 @@ pub(crate) struct AudioResource<'a> {
     /// The rate it's stored at.
     pub(crate) rate: Option<u32>,
     pub(crate) file_name: &'a [u8],
-    /// Where its stream is, unless the resource's two sizes disagree.
+    /// The sample its loop starts at, if it loops, which splits its sample
+    /// count and size again in two. The loop runs to its end.
+    pub(crate) loop_start: Option<u32>,
+    /// Where its stream is, unless the resource's sizes disagree.
     pub(crate) placement: Option<Placement>,
 }
 
@@ -272,13 +284,26 @@ pub(crate) fn audio_resource(data: &[u8], position: usize) -> Option<AudioResour
     if read(4)? != AUDIO {
         return None;
     }
-    let (offset, length, sample_count) = (read(OFFSET)?, read(SIZE)?, read(SAMPLE_COUNT)?);
+    let (offset, length) = (read(OFFSET)?, read(SIZE)?);
+    // A looping resource has the samples and bytes before its loop where the
+    // sample count and size again would be, and its loop's after them.
+    let looping = read(LOOPS)? & 1 != 0;
+    let before = (read(SAMPLE_COUNT)?, read(SIZE_AGAIN)?);
+    let (sample_count, size_again) = if looping {
+        (
+            before.0.checked_add(read(LOOP_SAMPLE_COUNT)?)?,
+            before.1.checked_add(read(LOOP_SIZE)?)?,
+        )
+    } else {
+        before
+    };
     Some(AudioResource {
         key: read(0)?,
         codec: read(CODEC),
         rate: read(RATE),
         file_name: file_name(data, position)?,
-        placement: (read(SIZE_AGAIN)? == length).then_some(Placement {
+        loop_start: looping.then_some(before.0),
+        placement: (size_again == length).then_some(Placement {
             offset: offset.into(),
             length: length.into(),
             sample_count,
@@ -298,11 +323,6 @@ pub(crate) fn file_name(data: &[u8], position: usize) -> Option<&[u8]> {
     let field = data.get(start..start.checked_add(32)?)?;
     let name = &field[..field.iter().position(|byte| *byte == 0)?];
     (!name.is_empty() && name.is_ascii()).then_some(name)
-}
-
-/// [`file_name`], as a string.
-pub(crate) fn read_file_name(data: &[u8], position: usize) -> Option<String> {
-    file_name(data, position).map(|name| String::from_utf8_lossy(name).into_owned())
 }
 
 #[cfg(test)]
@@ -471,6 +491,40 @@ pub(crate) mod tests {
                 (2, &b"STEP.wav"[..], vec![4, 0, 5, 0]),
             ]
         );
+    }
+
+    #[test]
+    fn counts_a_looping_clips_samples_before_and_in_its_loop() {
+        let mut map = map_with_clips(&[&[(1, "FIRE.wav", &[1, 2, 3, 4, 5])]], &[]);
+        let file = SoundMapFile::parse(&map).unwrap();
+        let resource = file.resources(&file.areas()[0]).next().unwrap();
+        for (field, value) in [
+            (LOOPS, 1),
+            (SAMPLE_COUNT, 2),
+            (SIZE_AGAIN, 4),
+            (LOOP_SAMPLE_COUNT, 3),
+            (LOOP_SIZE, 6),
+        ] {
+            write_u32(&mut map, resource + field, value);
+        }
+        let file = SoundMapFile::parse(&map).unwrap();
+        let clips = file.stored_clips(&file.areas()[0]);
+        assert_eq!((clips[0].sample_count, clips[0].loop_start), (5, Some(2)));
+    }
+
+    #[test]
+    fn places_no_looping_clip_whose_parts_dont_add_up_to_its_size() {
+        let mut map = map_with_clips(&[&[(1, "FIRE.wav", &[1, 2, 3, 4, 5])]], &[]);
+        let file = SoundMapFile::parse(&map).unwrap();
+        let resource = file.resources(&file.areas()[0]).next().unwrap();
+        // The size again at `+52`, as a clip that doesn't loop has it.
+        for (field, value) in [(LOOPS, 1), (LOOP_SAMPLE_COUNT, 3), (LOOP_SIZE, 6)] {
+            write_u32(&mut map, resource + field, value);
+        }
+        let audio = audio_resource(&map, resource).unwrap();
+        assert_eq!((audio.loop_start, audio.placement), (Some(5), None));
+        let file = SoundMapFile::parse(&map).unwrap();
+        assert!(file.stored_clips(&file.areas()[0]).is_empty());
     }
 
     pub(crate) fn write_u32(data: &mut [u8], position: usize, value: u32) {

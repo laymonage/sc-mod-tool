@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::sound_map_file::{AUDIO, SoundMapFile, read_file_name, read_u32};
+use crate::sound_map_file::{SoundMapFile, audio_resource, read_u32};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MapRecord {
@@ -15,7 +15,7 @@ pub(crate) struct MapRecord {
     /// The bank file holding the audio, such as `1_3_2.LS0`. A level can play
     /// sounds from another level's package, so this can't be inferred from the
     /// package name.
-    pub(super) bank: Option<String>,
+    pub(super) bank: String,
 }
 
 /// A `MAPS.LM0` and the banks it describes: the language's own folder, or one
@@ -70,25 +70,21 @@ pub(crate) fn parse_map_records(data: &[u8]) -> Result<HashMap<u32, HashSet<MapR
     Ok(records)
 }
 
-/// Reads the resource at `position`, if it's a clip of audio.
+/// Reads the resource at `position`, if it's a clip of audio whose sizes
+/// agree.
 fn read_audio_record(data: &[u8], position: usize) -> Option<MapRecord> {
-    let compressed_bytes = read_u32(data, position + 12)?;
-    let sample_count = read_u32(data, position + 48)?;
-    if read_u32(data, position + 4)? != AUDIO
-        || read_u32(data, position + 8)? != 1
-        || compressed_bytes == 0
-        || sample_count == 0
-        || read_u32(data, position + 52)? != compressed_bytes
-    {
+    let audio = audio_resource(data, position)?;
+    let placement = audio.placement?;
+    if read_u32(data, position + 8)? != 1 || placement.length == 0 || placement.sample_count == 0 {
         return None;
     }
     Some(MapRecord {
-        resource_key: read_u32(data, position)?,
-        offset: read_u32(data, position + 20)?,
-        compressed_bytes,
-        sample_count,
-        sample_rate: read_u32(data, position + 68).unwrap_or(0),
-        bank: read_file_name(data, position),
+        resource_key: audio.key,
+        offset: u32::try_from(placement.offset).ok()?,
+        compressed_bytes: u32::try_from(placement.length).ok()?,
+        sample_count: placement.sample_count,
+        sample_rate: audio.rate.unwrap_or(0),
+        bank: String::from_utf8_lossy(audio.file_name).into_owned(),
     })
 }
 
@@ -130,7 +126,6 @@ fn resolve_segment<'a>(
         ));
     };
 
-    let expected_code = sound_package_bank_code(sound_event);
     let mut matches = Vec::<&crate::Segment>::new();
     let mut add = |segment: &'a crate::Segment| {
         if !matches.iter().any(|matched| matched.id == segment.id) {
@@ -139,13 +134,11 @@ fn resolve_segment<'a>(
     };
     for record in records {
         // Audio in a numeric `.LS0` bank is a stream found by scanning it.
-        // Records name their bank; the package name is only a fallback.
-        for bank in map.banks.iter().filter(|bank| match &record.bank {
-            Some(name) => bank.name.eq_ignore_ascii_case(name),
-            None => expected_code
-                .as_deref()
-                .is_none_or(|code| bank.code.eq_ignore_ascii_case(code)),
-        }) {
+        for bank in map
+            .banks
+            .iter()
+            .filter(|bank| bank.name.eq_ignore_ascii_case(&record.bank))
+        {
             for segment in &bank.segments {
                 if segment.stream_range()
                     == Some((u64::from(record.offset), u64::from(record.compressed_bytes)))
@@ -186,28 +179,12 @@ fn resolve_segment<'a>(
     }
 }
 
-fn sound_package_bank_code(sound_event: &str) -> Option<String> {
-    let (package, _) = sound_event.split_once('.')?;
-    let code = package
-        .strip_prefix('S')?
-        .strip_suffix("Voice")?
-        .trim_end_matches('_');
-    if code.is_empty()
-        || !code
-            .chars()
-            .all(|character| character.is_ascii_digit() || character == '_')
-    {
-        return None;
-    }
-    Some(code.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::sound_map_file::tests::{test_map, write_u32};
     use crate::sound_map_file::{AREA_SIZE, EVENT_SIZE};
-    use crate::subtitles::tests::{test_bank, test_maps, test_records};
+    use crate::subtitles::tests::{test_bank, test_maps, test_records, test_records_in};
 
     #[test]
     fn finds_audio_through_the_events_that_play_it() {
@@ -224,7 +201,7 @@ mod tests {
                 compressed_bytes: 15_571,
                 sample_count: 29_967,
                 sample_rate: 36_000,
-                bank: Some("0_0_2.LS0".to_owned()),
+                bank: "0_0_2.LS0".to_owned(),
             }
         );
         assert_eq!(record(0x3c0001).resource_key, 0x3c0000);
@@ -246,19 +223,6 @@ mod tests {
         let mut data = test_map(&[(1, 0)], &[1]);
         data.truncate(0x0c + AREA_SIZE + 0x10);
         assert!(parse_map_records(&data).is_err());
-    }
-
-    #[test]
-    fn matches_sound_packages_to_numeric_bank_names() {
-        assert_eq!(
-            sound_package_bank_code("S1_1_0Voice.Play_11_04_02"),
-            Some("1_1_0".to_owned())
-        );
-        assert_eq!(
-            sound_package_bank_code("S1_1_Voice.Play_11_90_01"),
-            Some("1_1".to_owned())
-        );
-        assert_eq!(sound_package_bank_code("FisherVoice.Play_Alarm"), None);
     }
 
     #[test]
@@ -288,12 +252,12 @@ mod tests {
         let maps = [
             map(
                 "1_7_1_1VselkaInfiltration/English",
-                test_records(&[(7, 0)]),
+                test_records_in("3_1_1.LS0", &[(7, 0)]),
                 vec![&banks[0]],
             ),
             map(
                 "1_7_1_2Vselka/English",
-                test_records(&[(7, 100)]),
+                test_records_in("3_1_1.LS0", &[(7, 100)]),
                 vec![&banks[1]],
             ),
             map("ENGLISH", HashMap::new(), Vec::new()),
@@ -326,7 +290,7 @@ mod tests {
         records.insert(
             7,
             HashSet::from([MapRecord {
-                bank: Some("1_1_2.LS0".to_owned()),
+                bank: "1_1_2.LS0".to_owned(),
                 ..record
             }]),
         );
@@ -365,7 +329,7 @@ mod tests {
             0x660005,
             HashSet::from([MapRecord {
                 resource_key: 0x660002,
-                bank: Some("Music_Common.LS0".to_owned()),
+                bank: "Music_Common.LS0".to_owned(),
                 ..record
             }]),
         );

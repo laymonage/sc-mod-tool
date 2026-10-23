@@ -120,6 +120,9 @@ pub struct FileStream {
     pub offsets: Vec<u64>,
     pub byte_length: u64,
     pub format: StreamFormat,
+    /// The sample its loop starts at, if the game repeats it from there to
+    /// its end. A replacement keeps the loop where it is.
+    pub loop_start: Option<u32>,
 }
 
 /// How a stream that can be replaced is stored.
@@ -140,6 +143,8 @@ pub struct ReplaceableStream<'a> {
     pub offsets: &'a [u64],
     pub byte_length: u64,
     pub format: StreamFormat,
+    /// See [`FileStream::loop_start`].
+    pub loop_start: Option<u32>,
 }
 
 /// One of a sound map's areas, such as `1_1_0Tbilisi`: one for each level,
@@ -178,6 +183,7 @@ impl Segment {
                 offsets: std::slice::from_ref(offset),
                 byte_length: *byte_length,
                 format: StreamFormat::UbisoftAdpcm,
+                loop_start: None,
             }),
             SegmentSource::MapSound { stream, .. } => {
                 stream.as_ref().map(|stream| ReplaceableStream {
@@ -185,6 +191,7 @@ impl Segment {
                     offsets: &stream.offsets,
                     byte_length: stream.byte_length,
                     format: stream.format,
+                    loop_start: stream.loop_start,
                 })
             }
         }

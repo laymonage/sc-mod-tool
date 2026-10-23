@@ -26,6 +26,14 @@ pub(super) fn format_length(sample_count: usize, sample_rate: u32) -> String {
     }
 }
 
+/// Where a sound the game repeats from `loop_start` to its end loops from.
+pub(super) fn format_loop(loop_start: u32, sample_rate: u32) -> String {
+    match loop_start {
+        0 => "From its start".to_owned(),
+        start => format!("From {}", format_length(start as usize, sample_rate)),
+    }
+}
+
 pub(super) fn format_channels(channels: u32) -> String {
     match channels {
         1 => "Mono".to_owned(),
@@ -64,5 +72,11 @@ mod tests {
         assert_eq!(duration(119_960), "2:00.0");
         assert_eq!(duration(125_040), "2:05.0");
         assert_eq!(duration(3_599_960), "60:00.0");
+    }
+
+    #[test]
+    fn says_where_a_sound_loops_from() {
+        assert_eq!(format_loop(0, 24_000), "From its start");
+        assert_eq!(format_loop(120_448, 24_000), "From 5.0 s");
     }
 }

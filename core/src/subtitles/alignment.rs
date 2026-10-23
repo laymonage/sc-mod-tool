@@ -329,7 +329,7 @@ mod tests {
                     compressed_bytes: 10,
                     sample_count,
                     sample_rate: 36000,
-                    bank: None,
+                    bank: "1_1_2.LS0".to_owned(),
                 }]),
             );
         }

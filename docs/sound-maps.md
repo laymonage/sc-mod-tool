@@ -43,10 +43,11 @@ An audio resource (type `1`) continues:
 | Offset | Field |
 |---|---|
 | `+8` | `1`, in every audio resource in the game's maps. vgmstream reads `0` as audio in another file |
-| `+12` | Stream size in bytes, repeated at `+52` |
+| `+12` | Stream size in bytes, repeated at `+52` unless it loops |
 | `+20` | Offset of the stream in its file, `0` for audio stored in the map |
 | `+40` | Bit 0 set if it's streamed from another file, clear if it's stored in the map |
-| `+48` | Sample count |
+| `+44` | Bit 0 set if it [loops](#looping-clips) |
+| `+48` | Sample count, unless it loops |
 | `+68` | Sample rate |
 | `+72`, `+74` | Bits per decoded sample (16) and channels, 16-bit each |
 | `+76` | Codec: `1` 16-bit PCM, `2` Ubisoft ADPCM, `4` Ubisoft IMA ADPCM |
@@ -55,6 +56,26 @@ An audio resource (type `1`) continues:
 The file name is the [stream file](sound-banks.md) holding the audio, such as
 `1_3_2.LS0` or `Music_Common.SS0`, or, for audio stored in the map itself, the
 original recording's name, such as `DOOJAM_1.wav` or `CSOGAZ_1.ima`.
+
+### Looping clips
+
+A looping clip, such as an automatic weapon's fire (`AK47IS_1.wav`) or a
+fire's crackle (`FIRE_1.wav`), splits its sample count and size in two: the
+part before its loop, and the loop, from there to the clip's end, which the
+game repeats.
+
+| Offset | Field |
+|---|---|
+| `+48`, `+52` | Samples and bytes before the loop, usually `0` |
+| `+56`, `+60` | Samples and bytes in the loop |
+
+The clip's sample count is the sum of the two, which is how vgmstream reads
+it, and its size at `+12` is the sum of the two sizes. vgmstream reads the
+size from `+12` alone. `MAPS.SM0` has 80 looping clips, and the extra maps'
+own have 13 (`1_6_1_1kolacell`), 30 (`1_7_1_1VselkaInfiltration`) and 10
+(`1_7_1_2Vselka`), all stored in the map. No `MAPS.LM0` has any. A
+replacement keeps the loop where it was, so it should loop cleanly from there.
+The app shows where a sound it can replace loops from.
 
 Non-audio resources keep leftover bytes from the previous resource in fields
 they don't use, as vgmstream's notes warn, so a container can seem to have a

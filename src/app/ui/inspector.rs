@@ -13,7 +13,7 @@ use super::{
 };
 use crate::app::SCModToolApp;
 use crate::app::format::{
-    format_bytes, format_channels, format_duration, format_key, format_length,
+    format_bytes, format_channels, format_duration, format_key, format_length, format_loop,
 };
 use crate::app::names::bank_title;
 
@@ -176,6 +176,16 @@ impl SCModToolApp {
                                 );
                                 detail_row(ui, "Channels", format_channels(segment.channels));
                                 detail_row(ui, "Format", segment.codec.clone());
+                                if let Some(start) = segment
+                                    .replaceable_stream(&bank.path)
+                                    .and_then(|stream| stream.loop_start)
+                                {
+                                    detail_row(
+                                        ui,
+                                        "Loops",
+                                        format_loop(start, segment.sample_rate),
+                                    );
+                                }
                                 match segment.source {
                                     SegmentSource::Stream {
                                         offset,

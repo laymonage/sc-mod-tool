@@ -12,7 +12,7 @@ use super::Action;
 use super::widgets::{action_button, detail_row};
 use crate::app::SCModToolApp;
 use crate::app::edits::{GuardedAction, UnsavedChoice};
-use crate::app::format::format_length;
+use crate::app::format::{format_length, format_loop};
 
 /// Speeds a stretched replacement can change by before it's likely to sound
 /// unnatural.
@@ -26,6 +26,9 @@ impl SCModToolApp {
         let segment = &draft.segment;
         let rate = segment.sample_rate;
         let target = segment.sample_count as usize;
+        let loop_start = segment
+            .replaceable_stream(&draft.bank_path)
+            .and_then(|stream| stream.loop_start);
         let modal = egui::Modal::new(egui::Id::unique("replace")).show(ctx, |ui| {
             ui.set_width(440.0);
             ui.label(
@@ -44,6 +47,9 @@ impl SCModToolApp {
                         .on_hover_text(draft.source.display().to_string());
                     ui.end_row();
                     detail_row(ui, "Segment's length", format_length(target, rate));
+                    if let Some(start) = loop_start {
+                        detail_row(ui, "Loops", format_loop(start, rate));
+                    }
                     match &draft.samples {
                         Some(samples) => {
                             detail_row(ui, "File's length", format_length(samples.len(), rate))
@@ -60,6 +66,19 @@ impl SCModToolApp {
                         }
                     }
                 });
+            if loop_start.is_some() {
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "The game repeats this sound from there to its end, so the \
+                             replacement should loop cleanly from that point.",
+                        )
+                        .weak(),
+                    )
+                    .wrap(),
+                );
+            }
 
             if let Some(samples) = &draft.samples {
                 ui.add_space(8.0);
@@ -453,6 +472,7 @@ mod tests {
                     offsets: vec![64, 128],
                     byte_length: 20,
                     format: StreamFormat::Pcm16,
+                    loop_start: None,
                 }),
             };
         }
@@ -466,6 +486,30 @@ mod tests {
             harness.state().draft.as_ref().unwrap().fit.mode,
             FitMode::TrimPad
         );
+    }
+
+    #[test]
+    fn says_where_a_looping_sound_loops_from() {
+        let mut harness = harness();
+        {
+            let draft = harness.state_mut().draft.as_mut().unwrap();
+            draft.bank_path = "MAPS.SM0".to_owned();
+            draft.segment.source = sc_mod_tool_core::SegmentSource::MapSound {
+                subsong: 1,
+                key: Some(1),
+                areas: Vec::new(),
+                stream: Some(sc_mod_tool_core::FileStream {
+                    path: "MAPS.SM0".to_owned(),
+                    offsets: vec![64],
+                    byte_length: 20,
+                    format: StreamFormat::Pcm16,
+                    loop_start: Some(0),
+                }),
+            };
+        }
+        harness.run();
+        harness.get_by_label("From its start");
+        harness.get_by_label_contains("should loop cleanly");
     }
 
     #[test]
