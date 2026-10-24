@@ -1,2 +1,1 @@
-# Bash on Windows runners fails on CRLF line endings.
-*.sh text eol=lf
+* text=auto eol=lf
