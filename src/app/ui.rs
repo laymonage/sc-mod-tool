@@ -116,7 +116,7 @@ impl SCModToolApp {
                 self.play_or_pause(ctx, index);
             }
             Action::SkipTo(index) => self.skip_to(ctx, index),
-            Action::CyclePlaybackMode => self.playback_mode = self.playback_mode.next(),
+            Action::CyclePlaybackMode => self.cycle_playback_mode(),
             Action::Export(index) => {
                 self.selected_segment = Some(index);
                 self.export_segment(ctx, index);

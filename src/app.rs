@@ -44,6 +44,9 @@ enum WorkerMessage {
         request: u64,
         segment_id: String,
         original: bool,
+        /// The frame it loops from, read with the segment, as another bank
+        /// may be selected by the time it's decoded.
+        loop_start: Option<u32>,
         result: Result<PlayableAudio, Error>,
     },
     /// A replacement draft's file was read, and its replacement prepared if
@@ -659,9 +662,32 @@ impl SCModToolApp {
     /// Plays audio that's already decoded, such as a replacement's.
     fn play_preview(&mut self, preview: PlayableAudio, segment_id: String) {
         self.clear_playback();
-        match self.audio.play(preview, segment_id) {
+        let loop_start = self.loop_start(&segment_id);
+        let repeat = self.playback_mode == PlaybackMode::Repeat;
+        match self.audio.play(preview, segment_id, loop_start, repeat) {
             Ok(playback) => self.active_playback = Some(playback),
             Err(error) => self.set_status(format!("Could not start playback: {error}"), true),
+        }
+    }
+
+    /// The frame the selected bank's segment `segment_id` loops from in the
+    /// game, if it's a sound the app knows loops. A replacement loops from
+    /// the same frame. Only for audio that plays straight away: a decoded
+    /// segment's is read when it's asked for.
+    fn loop_start(&self, segment_id: &str) -> Option<u32> {
+        let bank = self.selected_bank()?;
+        let segment = bank
+            .segments
+            .iter()
+            .find(|segment| segment.id == segment_id)?;
+        segment.replaceable_stream(&bank.path)?.loop_start
+    }
+
+    /// Changes what happens when a segment ends, including the one playing.
+    fn cycle_playback_mode(&mut self) {
+        self.playback_mode = self.playback_mode.next();
+        if let Some(playback) = &self.active_playback {
+            playback.set_repeat(self.playback_mode == PlaybackMode::Repeat);
         }
     }
 
@@ -678,6 +704,9 @@ impl SCModToolApp {
             return;
         };
         let bank_path = bank.path.clone();
+        let loop_start = segment
+            .replaceable_stream(&bank_path)
+            .and_then(|stream| stream.loop_start);
         self.clear_playback();
         self.playback_request = self.playback_request.wrapping_add(1);
         let request = self.playback_request;
@@ -698,6 +727,7 @@ impl SCModToolApp {
                 request,
                 segment_id,
                 original,
+                loop_start,
                 result,
             });
             repaint.request_repaint();
@@ -886,8 +916,9 @@ impl SCModToolApp {
         self.play_or_pause(ctx, segment_index);
     }
 
-    /// Rewinds a segment that has played to the end, or plays it or the next
-    /// one again, depending on the playback mode.
+    /// Rewinds a segment that has played to the end, or plays the next one,
+    /// depending on the playback mode. A repeating segment loops by itself,
+    /// so it only ends here if repeat was turned on just as it ended.
     fn finish_playback(&mut self, ctx: &egui::Context) {
         let next = self
             .active_playback
@@ -954,14 +985,16 @@ impl SCModToolApp {
                     request,
                     segment_id,
                     original,
+                    loop_start,
                     result,
                 } => {
                     if request != self.playback_request {
                         continue;
                     }
                     self.pending_playback = None;
+                    let repeat = self.playback_mode == PlaybackMode::Repeat;
                     match result {
-                        Ok(audio) => match self.audio.play(audio, segment_id) {
+                        Ok(audio) => match self.audio.play(audio, segment_id, loop_start, repeat) {
                             Ok(mut playback) => {
                                 playback.original = original;
                                 self.active_playback = Some(playback);
