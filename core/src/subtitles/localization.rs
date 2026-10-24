@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,26 +16,35 @@ pub(super) fn line_text(text: &str) -> Option<String> {
 /// Reads every section of the localization files with `extension`, keeping
 /// each section's lines in file order. Cue names can repeat within a section.
 pub(super) fn localization_sections(
-    localization_root: &Path,
+    localization_roots: &[PathBuf],
     extension: &str,
 ) -> Result<HashMap<String, Vec<(String, String)>>, String> {
-    let entries = fs::read_dir(localization_root).map_err(|error| {
-        format!(
-            "Could not read directory {}: {error}",
-            localization_root.display()
-        )
-    })?;
-    let mut paths = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
+    // A file in a later root replaces the one of the same name in an earlier
+    // root. Files are read in name order.
+    let mut files = BTreeMap::<String, PathBuf>::new();
+    for localization_root in localization_roots {
+        let entries = fs::read_dir(localization_root).map_err(|error| {
+            format!(
+                "Could not read directory {}: {error}",
+                localization_root.display()
+            )
+        })?;
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path
+                .extension()
                 .is_some_and(|value| value.eq_ignore_ascii_case(extension))
-        })
-        .collect::<Vec<_>>();
-    paths.sort();
+            {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
+                files.insert(name, path);
+            }
+        }
+    }
     let mut sections = HashMap::<String, Vec<(String, String)>>::new();
-    for path in paths {
+    for path in files.into_values() {
         let Ok(bytes) = fs::read(&path) else {
             continue;
         };
