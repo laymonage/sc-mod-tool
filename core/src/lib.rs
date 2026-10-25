@@ -11,6 +11,7 @@ mod vgmstream;
 
 pub use banks::{SoundKind, discover_banks, discover_banks_with_progress, discover_languages};
 pub use error::Error;
+pub use sound_map_file::NORMAL_PITCH;
 
 use std::collections::HashMap;
 use std::fs;
@@ -105,6 +106,10 @@ pub enum SegmentSource {
         /// ADPCM stream in an `.LS0` file, such as Lambert's alarm warnings
         /// in `Music_Common.LS0`, or mono 16-bit PCM stored in the map.
         stream: Option<FileStream>,
+        /// The pitch the game plays the sound at, as a 16.16 fixed-point
+        /// multiple of its stored sample rate. The segment's `sample_rate` is
+        /// already pitched.
+        pitch: u32,
     },
 }
 
@@ -214,9 +219,9 @@ pub fn decode_segment(
             let bytes = read_segment_with_cancel(root, bank_path, offset, byte_length, cancelled)?;
             decoder::decode(&bytes, segment.sample_count, cancelled)
         }
-        SegmentSource::MapSound { subsong, .. } => {
+        SegmentSource::MapSound { subsong, pitch, .. } => {
             let sounds = find_sounds_directory(root)?;
-            decoder::decode_map_sound(&sounds, bank_path, subsong, cancelled)
+            decoder::decode_map_sound(&sounds, bank_path, subsong, pitch, cancelled)
         }
     }
 }

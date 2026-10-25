@@ -4,7 +4,7 @@ use eframe::egui::{self, CursorIcon, RichText};
 use egui_material_icons::icons::{
     ICON_AUDIO_FILE, ICON_DOWNLOAD, ICON_HISTORY, ICON_PAUSE, ICON_PLAY_ARROW, ICON_UNDO,
 };
-use sc_mod_tool_core::{Area, SegmentSource, subtitles::Subtitle};
+use sc_mod_tool_core::{Area, NORMAL_PITCH, SegmentSource, subtitles::Subtitle};
 
 use super::replace::{file_name, fit_description};
 use super::widgets::{action_button, badge, detail_row, small_detail_row};
@@ -205,7 +205,12 @@ impl SCModToolApp {
                                             RichText::new(offset.to_string()).monospace(),
                                         );
                                     }
-                                    SegmentSource::MapSound { subsong, key, .. } => {
+                                    SegmentSource::MapSound {
+                                        subsong,
+                                        key,
+                                        pitch,
+                                        ..
+                                    } => {
                                         if let Some(name) = &segment.name {
                                             detail_row(ui, "Name", name.clone());
                                         }
@@ -215,6 +220,18 @@ impl SCModToolApp {
                                             RichText::new(format_key(key)).monospace(),
                                         );
                                         detail_row(ui, "Map entry", subsong.to_string());
+                                        // The game pitches some sounds; the
+                                        // sample rate above includes it.
+                                        if pitch != NORMAL_PITCH {
+                                            detail_row(
+                                                ui,
+                                                "Pitch",
+                                                format!(
+                                                    "{:.2}×",
+                                                    f64::from(pitch) / f64::from(NORMAL_PITCH)
+                                                ),
+                                            );
+                                        }
                                     }
                                 }
                                 detail_row(ui, "File", bank.path.clone());

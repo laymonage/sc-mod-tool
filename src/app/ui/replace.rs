@@ -474,6 +474,7 @@ mod tests {
                     format: StreamFormat::Pcm16,
                     loop_start: None,
                 }),
+                pitch: sc_mod_tool_core::NORMAL_PITCH,
             };
         }
         harness.run();
@@ -505,6 +506,7 @@ mod tests {
                     format: StreamFormat::Pcm16,
                     loop_start: Some(0),
                 }),
+                pitch: sc_mod_tool_core::NORMAL_PITCH,
             };
         }
         harness.run();

@@ -316,6 +316,7 @@ mod tests {
             key: Some(0x660002),
             areas: Vec::new(),
             stream: None,
+            pitch: crate::sound_map_file::NORMAL_PITCH,
         };
         banks.push(voices);
         let mut records = test_records(&[(0x660005, 0)]);

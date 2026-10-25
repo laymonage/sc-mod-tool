@@ -14,7 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::missions::{leading_mission_code, mission_code};
-use crate::sound_map_file::{SoundMapFile, UBISOFT_ADPCM, audio_resource, file_name, read_u32};
+use crate::sound_map_file::{
+    NORMAL_PITCH, SoundMapFile, UBISOFT_ADPCM, audio_resource, file_name, pitched_sample_rate,
+    read_u32,
+};
 use crate::sounds_folder::find_file;
 use crate::vgmstream::{SharedFile, SoundInfo, Vgmstream};
 use crate::{Area, Bank, Error, FileStream, Segment, SegmentSource, StreamFormat};
@@ -107,7 +110,12 @@ pub(crate) fn read_map_banks(
         Err(error) => return Ok(vec![unreadable(error)]),
     };
     let sound_count = first.subsong_count.max(1);
-    let mut lists = SoundLists::default();
+    let mut lists = SoundLists {
+        pitches: SoundMapFile::parse(map_file.bytes())
+            .map(|file| file.clip_pitches())
+            .unwrap_or_default(),
+        ..SoundLists::default()
+    };
     let mut failures = 0;
     for (subsong, info) in open_sounds(sounds, path, &map_file, sound_count, cancelled)? {
         match info {
@@ -425,16 +433,19 @@ fn area(name: &str) -> Area {
 /// listed by several areas. Entries with the same key, name and length are the
 /// same sound, so it's listed once, with every area that plays it.
 #[derive(Default)]
-struct SoundLists {
+struct SoundLists<'a> {
     lists: BTreeMap<SoundKind, Vec<Segment>>,
     /// Where each sound with a key is in its list.
     listed: HashMap<(SoundKind, u32, String, u32), usize>,
     /// The IDs of sounds without a name of their own, which are listed by
     /// their stream file or kind of entry instead.
     unnamed: HashSet<String>,
+    /// The pitch the map's events play its clips at, by area name and
+    /// resource index, from [`SoundMapFile::clip_pitches`].
+    pitches: HashMap<(&'a [u8], usize), u32>,
 }
 
-impl SoundLists {
+impl SoundLists<'_> {
     /// Adds sound `subsong` of the map at `path`, unless it's in a numeric
     /// `.LS0` bank.
     fn add(&mut self, path: &str, subsong: u32, is_localized: bool, info: SoundInfo) {
@@ -466,6 +477,11 @@ impl SoundLists {
         if !entry.has_name() {
             self.unnamed.insert(id.clone());
         }
+        let pitch = entry
+            .index
+            .and_then(|index| self.pitches.get(&(entry.area.as_bytes(), index)))
+            .copied()
+            .unwrap_or(NORMAL_PITCH);
         segments.push(Segment {
             id,
             source: SegmentSource::MapSound {
@@ -477,10 +493,11 @@ impl SoundLists {
                     .map(area)
                     .collect(),
                 stream: None,
+                pitch,
             },
             name: Some(name),
             sample_count: info.sample_count,
-            sample_rate: info.sample_rate,
+            sample_rate: pitched_sample_rate(info.sample_rate, pitch),
             channels: info.channels,
             codec: info.codec,
             segment: 0,
@@ -555,11 +572,13 @@ fn open_sounds(
 }
 
 /// Where vgmstream says a map's sound is, from a stream name such as
-/// `1_1_0Tbilisi/0012/01-00130086/TAWCHI02.wav`: the area, the entry's type
-/// and sound key, and the sound's name or the file holding its audio.
+/// `1_1_0Tbilisi/0012/01-00130086/TAWCHI02.wav`: the area, the entry's index
+/// in the area's resources, its type and sound key, and the sound's name or
+/// the file holding its audio.
 #[derive(Debug, PartialEq, Eq)]
 struct MapEntry<'a> {
     area: &'a str,
+    index: Option<usize>,
     /// 0x01 for a sound, 0x0C for a sequence of sounds, and 0x0D for a sound
     /// in layers.
     entry_type: Option<u32>,
@@ -582,8 +601,10 @@ impl<'a> MapEntry<'a> {
                 )
             },
         );
+        let has_area = parts.len() == 4;
         MapEntry {
-            area: if parts.len() == 4 { parts[0] } else { "" },
+            area: if has_area { parts[0] } else { "" },
+            index: has_area.then(|| parts[1].parse().ok()).flatten(),
             entry_type,
             key,
             name: parts.last().copied().unwrap_or_default(),
@@ -673,6 +694,7 @@ mod tests {
             MapEntry::parse("1_1_0Tbilisi/0012/01-00130086/TAWCHI02.wav"),
             MapEntry {
                 area: "1_1_0Tbilisi",
+                index: Some(12),
                 entry_type: Some(0x01),
                 key: Some(0x0013_0086),
                 name: "TAWCHI02.wav",
@@ -680,7 +702,7 @@ mod tests {
         );
         let unexpected = MapEntry::parse("TAWCHI02.wav");
         assert_eq!(unexpected.area, "");
-        assert_eq!(unexpected.key, None);
+        assert_eq!((unexpected.index, unexpected.key), (None, None));
         assert_eq!(unexpected.display_name(), "TAWCHI02");
     }
 
@@ -742,6 +764,7 @@ mod tests {
                 key: Some(key),
                 areas: Vec::new(),
                 stream: None,
+                pitch: NORMAL_PITCH,
             },
             name: Some(name.to_owned()),
             sample_count: 29_967,

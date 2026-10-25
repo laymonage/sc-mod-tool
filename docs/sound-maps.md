@@ -145,11 +145,17 @@ too high. A few of [`MAPS.SM0`'s](#maps-sm0s-events) sound effects have a
 pitch too. Following each event through its containers gives every clip a
 single pitch.
 
-vgmstream applies it: for Splinter Cell (PC) maps, it finds the first play
-event that reaches a clip, directly or through containers, and scales the
-clip's sample rate by its pitch (`apply_event_pitch` in
-[`ubi_sb.c`](../vendor/vgmstream/src/meta/ubi_sb.c)). This is a change to the
-vendored vgmstream that isn't upstream yet.
+vgmstream plays each clip at its stored rate: it reads maps as banks of
+audio, and leaves what events do with it to other tools, as for other formats
+with events ("cue formats" in its usage notes). The app applies the pitch
+itself. For each clip, it finds the first play event in the clip's area that
+reaches it, directly or through containers, and scales the sample rate
+vgmstream gives by that event's pitch (`clip_pitches` in
+[`sound_map_file.rs`](../core/src/sound_map_file.rs)). A pitch outside ×0.25
+to ×4 is taken as garbage, and the clip plays at its stored rate. In
+`MAPS.LM0`, every play event uses a `0x40000000` reference. Its five events
+with a [plain reference](#maps-sm0s-events) are of type `10`, which aren't
+play events, and point at a container.
 
 ## Event keys aren't always resource keys
 
@@ -198,8 +204,8 @@ A few of its play events set a pitch other than 1.0, and the game applies it:
 
 This was tested by replacing `ALALAS_1.wav` with a 1,000 Hz tone and tripping
 a laser in the Defense Ministry: the game played it at 1,189 Hz, for 0.63 s of
-its 0.74 s. vgmstream follows plain references too, so the app previews and
-converts these clips at the rates the game plays them at.
+its 0.74 s. The app follows plain references too, so it previews and converts
+these clips at the rates the game plays them at.
 
 ## How the app lists them
 
