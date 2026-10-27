@@ -5,3 +5,4 @@ target/
 /core/uelib-bridge-tests/obj/
 /dist/
 /build/
+lines.json
